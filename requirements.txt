@@ -1,0 +1,24 @@
+# core
+pydantic
+pyyaml
+rich
+
+# model seam
+ollama
+
+# parsing
+tree-sitter
+tree-sitter-python
+
+# static analysis
+ruff
+mypy
+bandit
+
+# github
+requests
+unidiff
+
+# optional / later
+# vllm
+# semgrep
