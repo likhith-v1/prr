@@ -72,8 +72,8 @@ class Finding(BaseModel):
 ## Default stack (all swappable)
 - CLI: `prr`.
 - Bot language: Python.
-- Model: Qwen3-Coder-Next (or Devstral) via **Ollama** to start; move the seam to **vLLM** later for guided decoding + concurrency.
-- Structured output: Ollama `format=json` / vLLM guided decoding + Pydantic validation.
+- Model: `qwen2.5-coder:14b` via **Ollama** to start; move the seam to Qwen3-Coder/Devstral or **vLLM** later for guided decoding + concurrency.
+- Structured output: Ollama schema-guided `format` returning `{"findings": [...]}` / vLLM guided decoding + Pydantic validation.
 - GitHub: REST review API; self-hosted runner; workflow `GITHUB_TOKEN`.
 
 ## The weeks
