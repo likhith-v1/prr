@@ -57,8 +57,12 @@ class IngestTests(unittest.TestCase):
             """
         )
 
-        self.assertIn(("method", "method"), [(c.kind, c.name) for c in chunks])
-        self.assertIn(("method", "helper"), [(c.kind, c.name) for c in chunks])
+        self.assertEqual([(c.kind, c.name) for c in chunks], [
+            ("method", "Example.method"),
+            ("method", "Example.helper"),
+        ])
+        self.assertIn("class Example:", chunks[0].context)
+        self.assertIn("value = 1", chunks[0].context)
 
     def test_class_without_methods_remains_class_chunk(self) -> None:
         chunks = self.chunk_source(
@@ -69,6 +73,49 @@ class IngestTests(unittest.TestCase):
         )
 
         self.assertEqual([(c.kind, c.name) for c in chunks], [("class", "Constants")])
+
+    def test_duplicate_method_names_are_qualified_by_class(self) -> None:
+        chunks = self.chunk_source(
+            """
+            class First:
+                def run(self):
+                    return 1
+
+            class Second:
+                def run(self):
+                    return 2
+            """
+        )
+
+        self.assertEqual([c.name for c in chunks], ["First.run", "Second.run"])
+
+    def test_async_functions_are_chunked(self) -> None:
+        chunks = self.chunk_source(
+            """
+            async def fetch():
+                return 1
+
+            class Worker:
+                async def run(self):
+                    return 2
+            """
+        )
+
+        self.assertEqual([(c.kind, c.name) for c in chunks], [
+            ("function", "fetch"),
+            ("method", "Worker.run"),
+        ])
+
+    def test_syntax_error_file_falls_back_to_module_chunk(self) -> None:
+        chunks = self.chunk_source(
+            """
+            def broken(:
+                pass
+            """
+        )
+
+        self.assertEqual([(c.kind, c.name) for c in chunks], [("module", "<module>")])
+        self.assertIn("syntax errors", chunks[0].context)
 
 
 if __name__ == "__main__":

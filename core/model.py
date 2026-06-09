@@ -15,13 +15,10 @@ from typing import Any, Literal, Protocol
 import ollama
 from pydantic import BaseModel, ValidationError
 
+from core.config import DEFAULT_MODEL
 from core.schema import Finding
 
 logger = logging.getLogger(__name__)
-
-# ── one-line swap point ────────────────────────────────────────────────────────
-MODEL = "qwen2.5-coder:14b"
-# ──────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "review.txt").read_text(encoding="utf-8")
 
@@ -172,6 +169,7 @@ def review(
     context: str = "",
     findings: list[Finding] | None = None,
     backend: Backend | None = None,
+    model: str = DEFAULT_MODEL,
 ) -> list[Finding]:
     """Review one code chunk; return validated Finding objects.
 
@@ -182,13 +180,14 @@ def review(
         context:    Optional free-text context passed to the model.
         findings:   Prior findings from static tools to anchor the model.
         backend:    Override the default OllamaBackend (for testing/swap).
+        model:      Ollama model name when backend is not overridden.
     """
     if findings is None:
         findings = []
 
     if backend is None:
         backend = OllamaBackend(
-            model=MODEL,
+            model=model,
             format_schema=_LLMResponse.model_json_schema(),
         )
 

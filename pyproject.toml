@@ -13,6 +13,10 @@ dependencies = [
     "tree-sitter>=0.24",
     "tree-sitter-python>=0.23",
     "rich>=13.0",
+    "PyYAML>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "bandit>=1.7",
 ]
 
 [project.optional-dependencies]

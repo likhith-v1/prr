@@ -1,0 +1,11 @@
+model: qwen2.5-coder:14b
+severity_threshold: info
+min_confidence: 0.7
+max_comments_per_file: 20
+ignore_paths:
+  - .git/**
+  - .venv/**
+  - .uv-cache/**
+  - .pytest_cache/**
+  - .ruff_cache/**
+  - __pycache__/**
