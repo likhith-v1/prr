@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import unittest
 
-from core.model import _parse_findings, review
+import ollama
+
+from core.model import OllamaBackend, _parse_findings, review
 
 
 def response(*findings: dict[str, object]) -> str:
@@ -78,6 +80,17 @@ class ModelParsingTests(unittest.TestCase):
 
         self.assertEqual(len(parsed), 1)
         self.assertEqual(len(backend.calls), 2)
+
+
+class OllamaBackendHostTests(unittest.TestCase):
+    def test_configured_host_builds_dedicated_client(self) -> None:
+        backend = OllamaBackend(model="m", host="http://192.168.1.5:11434")
+        self.assertIsInstance(backend._client, ollama.Client)
+
+    def test_no_host_uses_module_client(self) -> None:
+        # host=None defers to the module-level client, which honors OLLAMA_HOST.
+        backend = OllamaBackend(model="m")
+        self.assertIs(backend._client, ollama)
 
 
 if __name__ == "__main__":

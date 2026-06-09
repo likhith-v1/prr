@@ -130,6 +130,7 @@ def _review_file(
                 context=build_context(chunk, static_findings),
                 findings=prior,
                 model=config.model,
+                ollama_host=config.ollama_host,
             )
         except ModelBackendError as exc:
             console.print("[red]Model backend failed.[/red]")
@@ -138,6 +139,11 @@ def _review_file(
                 "[dim]Start Ollama and make sure the model is available: "
                 f"ollama pull {config.model}[/dim]"
             )
+            if config.ollama_host:
+                console.print(
+                    f"[dim]Using ollama_host {config.ollama_host} — confirm it is "
+                    "reachable (e.g. from WSL to a Windows/remote GPU host).[/dim]"
+                )
             return [], False
         all_findings.extend(found)
     return all_findings, True

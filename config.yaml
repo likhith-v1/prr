@@ -1,4 +1,5 @@
 model: qwen2.5-coder:14b
+# ollama_host: http://localhost:11434  # set when Ollama runs on a Windows host / remote box (e.g. from WSL2)
 severity_threshold: info
 min_confidence: 0.7
 max_comments_per_file: 20

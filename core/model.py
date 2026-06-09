@@ -38,9 +38,17 @@ class ModelBackendError(RuntimeError):
 class OllamaBackend:
     """Ollama backend using the ollama Python client."""
 
-    def __init__(self, model: str, format_schema: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        format_schema: dict[str, Any] | None = None,
+        host: str | None = None,
+    ) -> None:
         self.model = model
         self.format_schema = format_schema
+        # host=None -> module-level client, which honors the OLLAMA_HOST env var.
+        # A configured host (e.g. WSL pointing at a Windows/remote GPU box) wins.
+        self._client: Any = ollama.Client(host=host) if host else ollama
 
     def generate(self, system: str, user: str) -> str:
         kwargs: dict[str, Any] = {
@@ -53,7 +61,7 @@ class OllamaBackend:
         if self.format_schema is not None:
             kwargs["format"] = self.format_schema
         try:
-            response = ollama.chat(**kwargs)
+            response = self._client.chat(**kwargs)
         except (ConnectionError, ollama.RequestError, ollama.ResponseError) as exc:
             raise ModelBackendError(str(exc)) from exc
         return response["message"]["content"]
@@ -170,17 +178,19 @@ def review(
     findings: list[Finding] | None = None,
     backend: Backend | None = None,
     model: str = DEFAULT_MODEL,
+    ollama_host: str | None = None,
 ) -> list[Finding]:
     """Review one code chunk; return validated Finding objects.
 
     Args:
-        code:       Source text of the chunk.
-        path:       File path (used in Finding.path and the prompt).
-        start_line: Absolute 1-based line number of the first line of *code*.
-        context:    Optional free-text context passed to the model.
-        findings:   Prior findings from static tools to anchor the model.
-        backend:    Override the default OllamaBackend (for testing/swap).
-        model:      Ollama model name when backend is not overridden.
+        code:        Source text of the chunk.
+        path:        File path (used in Finding.path and the prompt).
+        start_line:  Absolute 1-based line number of the first line of *code*.
+        context:     Optional free-text context passed to the model.
+        findings:    Prior findings from static tools to anchor the model.
+        backend:     Override the default OllamaBackend (for testing/swap).
+        model:       Ollama model name when backend is not overridden.
+        ollama_host: Ollama server URL; falls back to OLLAMA_HOST env, then default.
     """
     if findings is None:
         findings = []
@@ -189,6 +199,7 @@ def review(
         backend = OllamaBackend(
             model=model,
             format_schema=_LLMResponse.model_json_schema(),
+            host=ollama_host,
         )
 
     user_prompt = _build_user_prompt(code, path, start_line, context, findings)

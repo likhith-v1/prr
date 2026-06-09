@@ -106,6 +106,39 @@ class IngestTests(unittest.TestCase):
             ("method", "Worker.run"),
         ])
 
+    def test_crlf_source_matches_lf_chunking(self) -> None:
+        # A Windows/CRLF checkout must produce identical, LF-normalized chunks so
+        # line numbers stay 1-based and absolute regardless of platform.
+        body = (
+            "import os\n"
+            "\n"
+            "def first():\n"
+            "    return 1\n"
+            "\n"
+            "def second():\n"
+            "    return 2\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            lf_path = Path(tmp) / "lf.py"
+            crlf_path = Path(tmp) / "crlf.py"
+            lf_path.write_bytes(body.encode("utf-8"))
+            crlf_path.write_bytes(body.replace("\n", "\r\n").encode("utf-8"))
+
+            lf_chunks = chunk_file(lf_path)
+            crlf_chunks = chunk_file(crlf_path)
+
+        self.assertEqual(
+            [(c.kind, c.name, c.start_line, c.end_line) for c in crlf_chunks],
+            [(c.kind, c.name, c.start_line, c.end_line) for c in lf_chunks],
+        )
+        # Chunk code is LF-normalized — no stray carriage returns leak through.
+        for chunk in crlf_chunks:
+            self.assertNotIn("\r", chunk.code)
+        self.assertEqual(
+            [c.code for c in crlf_chunks],
+            [c.code for c in lf_chunks],
+        )
+
     def test_syntax_error_file_falls_back_to_module_chunk(self) -> None:
         chunks = self.chunk_source(
             """

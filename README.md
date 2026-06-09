@@ -4,6 +4,37 @@
 
 > Personal project. Not a product. Built so the **model is a swappable part** — revisit later, drop in a better open model, watch it improve for free.
 
+## Platforms & setup
+
+Supported: **macOS**, **native Linux**, and **WSL2**. The code is pure Python (`pathlib`,
+UTF-8 everywhere, no shell-outs beyond arg-list `subprocess`), so the same steps work on all three.
+
+**macOS / native Linux**
+```bash
+# 1. install uv (https://docs.astral.sh/uv/)
+# 2. start Ollama and pull the model
+ollama pull qwen2.5-coder:14b
+# 3. run
+uv run prr review sample.py
+```
+
+**WSL2** — same as Linux, with one wrinkle: if Ollama runs on the **Windows host** (where the GPU
+usually is) or on a remote box, `localhost:11434` may not reach it from inside WSL2 under default
+NAT networking. Two options:
+- Point `prr` at the host explicitly — set `ollama_host` in `config.yaml`
+  (e.g. `ollama_host: http://<windows-host-ip>:11434`) or export `OLLAMA_HOST=http://<host>:11434`.
+- Or enable WSL2 **mirrored networking** (Windows 11), which forwards `localhost` to the host so no
+  host config is needed.
+
+`prr` resolves the Ollama host in this order: `config.yaml` `ollama_host` → `OLLAMA_HOST` env →
+the client default (`http://localhost:11434`).
+
+**Windows** — use **WSL2**. Native Windows is not separately supported: the GPU/self-hosted-runner/
+Ollama/static-tool stack is most uniform on Linux, and WSL2 gives Windows users a real Linux
+environment on the same machine without a second codebase to maintain.
+
+CI runs the test + lint suite on `ubuntu-latest` (covers Linux/WSL2) and `macos-latest`.
+
 ## Locked decisions
 
 - **Hook into GitHub:** self-hosted GitHub Actions runner (+ a `prr` CLI). The runner sits on the GPU machine, so it reaches the local model directly and is **outbound-only** — no inbound webhook, no exposing your home network. The CLI shares the same core for whole-repo scans and local testing.
@@ -51,7 +82,7 @@ prr/
   frontends/
     cli.py            # prr review <file|--pr> / prr scan <path>
     action_entry.py   # called by the workflow
-  config.yaml         # severity threshold, ignore paths, max comments
+  config.yaml         # model, ollama_host, severity threshold, ignore paths, max comments
   .github/workflows/review.yml
 ```
 
