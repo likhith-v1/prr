@@ -108,6 +108,42 @@ class CliTests(unittest.TestCase):
         self.assertIn("sample.py", rendered)
         self.assertIn("Undefined name", rendered)
 
+    def test_scan_respects_ignore_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            included = root / "sample.py"
+            ignored_dir = root / ".venv"
+            ignored = ignored_dir / "ignored.py"
+            included.write_text("x = 1\n", encoding="utf-8")
+            ignored_dir.mkdir()
+            ignored.write_text("raise RuntimeError('skip me')\n", encoding="utf-8")
+            output = io.StringIO()
+            static_calls: list[list[Path]] = []
+            review_calls: list[str] = []
+
+            def fake_static(paths: list[Path], root: Path) -> list[Finding]:
+                static_calls.append(paths)
+                return []
+
+            def fake_review(**kwargs: object) -> list[Finding]:
+                review_calls.append(str(kwargs["path"]))
+                return []
+
+            with (
+                patch("frontends.cli.run_static_tools", side_effect=fake_static),
+                patch("frontends.cli.review", side_effect=fake_review),
+                patch(
+                    "frontends.cli.console",
+                    Console(file=output, force_terminal=False, color_system=None),
+                ),
+            ):
+                result = cmd_scan(argparse.Namespace(path=str(root), config=None))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(static_calls, [[included]])
+        self.assertEqual(review_calls, [str(included)])
+        self.assertIn("prr is purring", output.getvalue())
+
     def test_scan_invalid_config_is_user_facing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
