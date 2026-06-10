@@ -24,6 +24,14 @@ _MYPY_LINE = re.compile(
     r"(?P<level>error|note|warning): (?P<message>.*)$"
 )
 
+_RUFF_FAMILY = re.compile(r"^([A-Z]+)")
+
+
+def _ruff_family(code: str) -> str:
+    """Letter prefix of a ruff rule code, e.g. 'SIM101' -> 'SIM', 'S608' -> 'S'."""
+    match = _RUFF_FAMILY.match(code)
+    return match.group(1) if match else ""
+
 
 def _relative_path(path: str, root: Path | None) -> str:
     candidate = Path(path)
@@ -56,13 +64,14 @@ def _finding(**data: object) -> Finding | None:
 
 
 def _ruff_category(code: str) -> Literal["bug", "security", "style", "perf", "test", "other"]:
-    if code.startswith("S"):
+    family = _ruff_family(code)
+    if family == "S":
         return "security"
-    if code.startswith("PERF"):
+    if family == "PERF":
         return "perf"
-    if code.startswith("PT"):
+    if family == "PT":
         return "test"
-    if code.startswith(("B", "F821", "F823", "E9")):
+    if family == "B" or code.startswith(("F821", "F823", "E9")):
         return "bug"
     if code:
         return "style"
@@ -70,7 +79,7 @@ def _ruff_category(code: str) -> Literal["bug", "security", "style", "perf", "te
 
 
 def _ruff_severity(code: str) -> Literal["info", "warning", "error"]:
-    if code.startswith(("F821", "F823", "E9", "S")):
+    if _ruff_family(code) == "S" or code.startswith(("F821", "F823", "E9")):
         return "error"
     return "warning"
 

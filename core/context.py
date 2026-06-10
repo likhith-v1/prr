@@ -9,43 +9,45 @@ from core.ingest import Chunk
 from core.schema import Finding
 
 
-def _same_path(left: str, right: str) -> bool:
-    if left == right:
-        return True
-    left_path = Path(left)
-    right_path = Path(right)
-    if not left_path.is_absolute() and right_path.match(left_path.as_posix()):
-        return True
-    if not right_path.is_absolute() and left_path.match(right_path.as_posix()):
-        return True
+def _resolve(path_text: str, root: Path) -> Path:
+    candidate = Path(path_text)
+    if not candidate.is_absolute():
+        candidate = root / candidate
     try:
-        return left_path.resolve() == right_path.resolve()
+        return candidate.resolve()
     except OSError:
-        return left_path.name == right_path.name
+        return candidate
 
 
-def findings_for_chunk(chunk: Chunk, findings: Iterable[Finding]) -> list[Finding]:
-    """Return findings from the same file whose primary line lands in the chunk."""
+def _same_path(left: str, right: str, root: Path) -> bool:
+    return _resolve(left, root) == _resolve(right, root)
+
+
+def findings_for_chunk(
+    chunk: Chunk,
+    findings: Iterable[Finding],
+    root: str | Path | None = None,
+) -> list[Finding]:
+    """Return findings from the same file whose primary line lands in the chunk.
+
+    Relative paths on either side are resolved against *root* (default: cwd),
+    so a root-relative tool path and an absolute chunk path compare equal only
+    when they point at the same file.
+    """
+    root_path = Path(root) if root is not None else Path.cwd()
     return [
         finding
         for finding in findings
-        if _same_path(finding.path, chunk.path)
+        if _same_path(finding.path, chunk.path, root_path)
         and chunk.start_line <= finding.line <= chunk.end_line
     ]
 
 
-def build_context(chunk: Chunk, prior_findings: Iterable[Finding]) -> str:
-    """Build free-text context passed alongside the chunk code."""
-    parts: list[str] = []
-    if chunk.context:
-        parts.append(chunk.context)
+def build_context(chunk: Chunk) -> str:
+    """Build free-text context passed alongside the chunk code.
 
-    local_findings = findings_for_chunk(chunk, prior_findings)
-    if local_findings:
-        rendered = [
-            f"- line {finding.line} [{finding.source}/{finding.severity}]: {finding.comment}"
-            for finding in local_findings
-        ]
-        parts.append("Static findings in this chunk:\n" + "\n".join(rendered))
-
-    return "\n\n".join(parts)
+    Prior findings are passed to the model separately (structured) via
+    ``core.model.review(findings=...)``; they are deliberately not rendered
+    here to avoid duplicating them in the prompt.
+    """
+    return chunk.context

@@ -93,6 +93,36 @@ class FilterTests(unittest.TestCase):
         self.assertIn("crashes", findings[0].comment)
         self.assertEqual(findings[0].suggestion, "print(name)")
 
+    def test_merges_distinct_static_findings_on_same_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "sample.py"
+            path.write_text("x = eval(data)\n", encoding="utf-8")
+
+            findings = filter_findings(
+                [
+                    make_finding(
+                        path=str(path),
+                        source="ruff",
+                        severity="error",
+                        comment="S307: Use of possibly insecure `eval`",
+                    ),
+                    make_finding(
+                        path=str(path),
+                        source="ruff",
+                        severity="warning",
+                        comment="F841: Local variable `x` is assigned to but never used",
+                    ),
+                ],
+                config=PrrConfig(),
+                root=root,
+            )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "error")
+        self.assertIn("insecure `eval`", findings[0].comment)
+        self.assertIn("never used", findings[0].comment)
+
     def test_sorts_by_severity_and_caps_per_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

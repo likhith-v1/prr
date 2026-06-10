@@ -76,28 +76,42 @@ def _sort_key(finding: Finding) -> tuple[int, int, int, int, float]:
     )
 
 
+def _joined_comments(findings: list[Finding]) -> str:
+    comments: list[str] = []
+    for finding in findings:
+        if finding.comment not in comments:
+            comments.append(finding.comment)
+    return " ".join(comments)
+
+
 def _merge_duplicate_group(findings: list[Finding]) -> Finding:
     if len(findings) == 1:
         return findings[0]
 
-    static = [f for f in findings if f.source != "llm"]
-    llm = [f for f in findings if f.source == "llm"]
+    static = sorted((f for f in findings if f.source != "llm"), key=_sort_key)
+    llm = sorted((f for f in findings if f.source == "llm"), key=_sort_key)
     severity = max((f.severity for f in findings), key=lambda s: _SEVERITY_ORDER[s])
 
     if static and llm:
-        tool_finding = sorted(static, key=_sort_key)[0]
-        llm_finding = sorted(llm, key=_sort_key)[0]
-        comment = tool_finding.comment
-        if llm_finding.comment not in comment:
-            comment = f"{comment} {llm_finding.comment}"
+        tool_finding = static[0]
+        llm_finding = llm[0]
         return tool_finding.model_copy(update={
             "severity": severity,
-            "comment": comment,
+            "comment": _joined_comments([*static, llm_finding]),
             "suggestion": llm_finding.suggestion or tool_finding.suggestion,
             "confidence": max(f.confidence for f in findings),
         })
 
-    return sorted(findings, key=_sort_key)[0].model_copy(update={
+    if static:
+        # Distinct tool diagnostics on one line are all real; keep every comment.
+        return static[0].model_copy(update={
+            "severity": severity,
+            "comment": _joined_comments(static),
+            "suggestion": next((f.suggestion for f in static if f.suggestion), None),
+            "confidence": max(f.confidence for f in findings),
+        })
+
+    return llm[0].model_copy(update={
         "severity": severity,
         "confidence": max(f.confidence for f in findings),
     })

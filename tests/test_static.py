@@ -31,6 +31,42 @@ class StaticParserTests(unittest.TestCase):
         self.assertEqual(findings[0].category, "bug")
         self.assertEqual(findings[0].source, "ruff")
 
+    def test_ruff_code_families_use_exact_prefix(self) -> None:
+        def entry(code: str) -> dict[str, object]:
+            return {
+                "filename": "sample.py",
+                "code": code,
+                "message": "msg",
+                "location": {"row": 1, "column": 1},
+            }
+
+        raw = json.dumps([
+            entry("S608"),    # bandit-derived → security/error
+            entry("SIM101"),  # simplify, not security
+            entry("SLF001"),  # private access, not security
+            entry("B006"),    # bugbear → bug
+            entry("BLE001"),  # blind-except, not bugbear
+            entry("PT011"),   # pytest-style → test
+            entry("PTH123"),  # pathlib, not pytest-style
+        ])
+
+        findings = parse_ruff_json(raw)
+
+        by_code = {f.comment.split(":")[0]: f for f in findings}
+        self.assertEqual(
+            (by_code["S608"].category, by_code["S608"].severity), ("security", "error")
+        )
+        self.assertEqual(
+            (by_code["SIM101"].category, by_code["SIM101"].severity), ("style", "warning")
+        )
+        self.assertEqual(
+            (by_code["SLF001"].category, by_code["SLF001"].severity), ("style", "warning")
+        )
+        self.assertEqual(by_code["B006"].category, "bug")
+        self.assertEqual(by_code["BLE001"].category, "style")
+        self.assertEqual(by_code["PT011"].category, "test")
+        self.assertEqual(by_code["PTH123"].category, "style")
+
     def test_parse_mypy_text(self) -> None:
         raw = "\n".join([
             "sample.py:2: error: Name \"nam\" is not defined  [name-defined]",

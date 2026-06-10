@@ -117,6 +117,10 @@ class CliTests(unittest.TestCase):
             included.write_text("x = 1\n", encoding="utf-8")
             ignored_dir.mkdir()
             ignored.write_text("raise RuntimeError('skip me')\n", encoding="utf-8")
+            nested_dir = root / "sub" / ".venv"
+            nested_dir.mkdir(parents=True)
+            nested = nested_dir / "nested.py"
+            nested.write_text("raise RuntimeError('skip me too')\n", encoding="utf-8")
             output = io.StringIO()
             static_calls: list[list[Path]] = []
             review_calls: list[str] = []

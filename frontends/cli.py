@@ -104,16 +104,18 @@ def _review_file(
     path: Path,
     config: PrrConfig,
     static_findings: list[Finding],
-) -> tuple[list[Finding], bool]:
+    root: Path,
+) -> tuple[list[Finding], bool, bool]:
+    """Review one file; returns (findings, ok, had_chunks)."""
     try:
         chunks = chunk_file(path)
     except (OSError, UnicodeDecodeError) as exc:
         console.print(f"[red]Could not chunk file:[/red] {path}")
         console.print(f"[dim]{exc}[/dim]")
-        return [], False
+        return [], False, False
 
     if not chunks:
-        return [], True
+        return [], True, False
 
     all_findings: list[Finding] = []
     for chunk in chunks:
@@ -121,13 +123,13 @@ def _review_file(
             f"  [dim]→ {chunk.kind} [bold]{chunk.name}[/bold]"
             f"  (lines {chunk.start_line}–{chunk.end_line})[/dim]"
         )
-        prior = findings_for_chunk(chunk, static_findings)
+        prior = findings_for_chunk(chunk, static_findings, root=root)
         try:
             found = review(
                 code=chunk.code,
                 path=str(path),
                 start_line=chunk.start_line,
-                context=build_context(chunk, static_findings),
+                context=build_context(chunk),
                 findings=prior,
                 model=config.model,
                 ollama_host=config.ollama_host,
@@ -144,9 +146,9 @@ def _review_file(
                     f"[dim]Using ollama_host {config.ollama_host} — confirm it is "
                     "reachable (e.g. from WSL to a Windows/remote GPU host).[/dim]"
                 )
-            return [], False
+            return [], False, True
         all_findings.extend(found)
-    return all_findings, True
+    return all_findings, True, True
 
 
 def _render_findings(findings: list[Finding], target: Path) -> int:
@@ -179,7 +181,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     console.print(f"\n[bold]prr[/bold] reviewing [cyan]{path}[/cyan] …\n")
 
     static_findings = run_static_tools([path], root=Path.cwd())
-    llm_findings, ok = _review_file(path, config, static_findings)
+    llm_findings, ok, had_chunks = _review_file(path, config, static_findings, root=Path.cwd())
     if not ok:
         return 2
 
@@ -188,7 +190,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         config=config,
         root=Path.cwd(),
     )
-    if not all_findings and not chunk_file(path):
+    if not all_findings and not had_chunks:
         console.print("[dim]File is empty.[/dim]")
         return 0
 
@@ -200,7 +202,11 @@ def _is_ignored(path: Path, root: Path, config: PrrConfig) -> bool:
         rel = path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         rel = path.as_posix()
-    return any(fnmatch.fnmatch(rel, pattern) for pattern in config.ignore_paths)
+    # Patterns like ".venv/**" must also catch nested trees ("sub/.venv/...").
+    return any(
+        fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(rel, f"**/{pattern}")
+        for pattern in config.ignore_paths
+    )
 
 
 def _collect_python_files(target: Path, config: PrrConfig) -> tuple[Path, list[Path]] | None:
@@ -265,7 +271,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     llm_findings: list[Finding] = []
     for path in files:
         console.print(f"[dim]file {path}[/dim]")
-        found, ok = _review_file(path, config, static_findings)
+        found, ok, _ = _review_file(path, config, static_findings, root=root)
         if not ok:
             return 2
         llm_findings.extend(found)
