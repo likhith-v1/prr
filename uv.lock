@@ -356,6 +356,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "bandit" },
+    { name = "httpx" },
     { name = "mypy" },
     { name = "ollama" },
     { name = "pydantic" },
@@ -374,6 +375,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "bandit", specifier = ">=1.7" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "ollama", specifier = ">=0.4.5" },
     { name = "pydantic", specifier = ">=2.0" },

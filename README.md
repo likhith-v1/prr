@@ -7,7 +7,7 @@ with LLM review, and filters output before showing it to the user.
 Current status:
 - Implemented: `prr review <file>`
 - Implemented: `prr scan <path>`
-- Planned: GitHub PR inline review comments
+- Implemented: `prr review --pr owner/repo#n` (GitHub PR inline review comments)
 - Planned: self-hosted GitHub Actions runner integration
 
 ## Requirements
@@ -40,6 +40,14 @@ Scan a Python file or directory:
 uv run prr scan .
 ```
 
+Review a GitHub pull request (posts one batched inline review):
+
+```bash
+export GITHUB_TOKEN=...   # PAT with pull-request access
+uv run prr review --pr owner/repo#123 --dry-run   # preview without posting
+uv run prr review --pr owner/repo#123             # post the review
+```
+
 Run tests and lint:
 
 ```bash
@@ -65,6 +73,7 @@ model: qwen2.5-coder:14b
 severity_threshold: info
 min_confidence: 0.7
 max_comments_per_file: 20
+max_comments_per_pr: 10
 ignore_paths:
   - .git/**
   - .venv/**
@@ -121,8 +130,11 @@ Core modules:
 - `core/detect_static.py`: `ruff`, `mypy`, and `bandit` adapters
 - `core/context.py`: context and static-finding attachment
 - `core/model.py`: Ollama model seam and structured output parsing
-- `core/filter.py`: line validation, deduplication, thresholds, sorting, caps
-- `frontends/cli.py`: `review` and `scan` commands
+- `core/filter.py`: line validation, deduplication, thresholds, sorting, caps,
+  diff-line restriction in PR mode
+- `core/diff.py`: GitHub patch parsing into added/commentable line sets
+- `core/github_out.py`: GitHub REST client and review payload builders
+- `frontends/cli.py`: `review` (file or `--pr`) and `scan` commands
 
 ## Output Rules
 
@@ -143,18 +155,25 @@ Static tool findings and LLM findings are merged when they land on the same
 line. Static tools keep the located fact; LLM output can provide explanation or
 replacement suggestions.
 
-## GitHub PR Review Plan
+## GitHub PR Review
 
-GitHub integration is planned but not implemented yet.
+`prr review --pr owner/repo#n` fetches the PR's changed Python files at the
+head commit, reviews only chunks that overlap added lines, and posts **one**
+batched review:
 
-Target behavior:
+- inline comments on the RIGHT side of the diff, prefixed with the cat mood
+  for the finding's severity
+- `suggestion` fields rendered as one-click ```suggestion blocks
+- a summary body with the cat verdict and counts by severity
+- findings outside added lines are dropped
+- patchless/skipped Python files are noted in the summary
+- PR static analysis is file-scoped; `mypy` is skipped until full-checkout
+  review is added
+- at most `max_comments_per_pr` comments per review; the rest are noted in
+  the summary
 
-- fetch changed files and hunks for a PR
-- review only changed lines plus local context
-- drop findings outside the diff
-- post one batched GitHub review
-- add inline comments with optional ```suggestion blocks
-- add a short summary comment
+Authentication uses a PAT from the `GITHUB_TOKEN` environment variable.
+Use `--dry-run` to inspect the review without posting.
 
 The intended deployment model is a self-hosted GitHub Actions runner on the
 machine that can reach Ollama. Use trusted/private repositories only; a

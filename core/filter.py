@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from pydantic import ValidationError
 
@@ -117,12 +117,37 @@ def _merge_duplicate_group(findings: list[Finding]) -> Finding:
     })
 
 
+def _restrict_to_allowed_lines(
+    finding: Finding,
+    allowed_lines: Mapping[str, set[int]],
+) -> Finding | None:
+    """Keep only findings GitHub will accept as diff comments.
+
+    The finding's display path must have an entry and its primary line must be
+    commentable.  A range whose tail leaves the diff falls back to a
+    single-line anchor and drops any suggestion so GitHub cannot apply a
+    multi-line replacement to one line.
+    """
+    allowed = allowed_lines.get(finding.path)
+    if allowed is None or finding.line not in allowed:
+        return None
+    if finding.end_line is not None:
+        if not all(line in allowed for line in range(finding.line, finding.end_line + 1)):
+            return finding.model_copy(update={"end_line": None, "suggestion": None})
+    return finding
+
+
 def filter_findings(
     findings: Iterable[Finding],
     config: PrrConfig,
     root: str | Path = ".",
+    allowed_lines: Mapping[str, set[int]] | None = None,
 ) -> list[Finding]:
-    """Validate, deduplicate, threshold, cap, and sort findings."""
+    """Validate, deduplicate, threshold, cap, and sort findings.
+
+    When *allowed_lines* is given (PR mode), it maps root-relative posix paths
+    to the set of diff-commentable line numbers; findings outside it are dropped.
+    """
     root_path = Path(root)
     line_cache: dict[Path, int] = {}
     validated: list[Finding] = []
@@ -131,6 +156,8 @@ def filter_findings(
         if not _passes_thresholds(finding, config):
             continue
         checked = _validated_finding(finding, root_path, line_cache)
+        if checked is not None and allowed_lines is not None:
+            checked = _restrict_to_allowed_lines(checked, allowed_lines)
         if checked is not None:
             validated.append(checked)
 

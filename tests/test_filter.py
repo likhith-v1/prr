@@ -145,5 +145,48 @@ class FilterTests(unittest.TestCase):
         ])
 
 
+    def test_allowed_lines_drops_out_of_diff_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "sample.py"
+            path.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+            other = root / "other.py"
+            other.write_text("d = 4\n", encoding="utf-8")
+
+            findings = filter_findings(
+                [
+                    make_finding(path=str(path), line=2),
+                    make_finding(path=str(path), line=3),
+                    make_finding(path=str(other), line=1),
+                ],
+                config=PrrConfig(),
+                root=root,
+                allowed_lines={"sample.py": {1, 2}},
+            )
+
+        self.assertEqual(
+            [(finding.path, finding.line) for finding in findings],
+            [("sample.py", 2)],
+        )
+
+    def test_allowed_lines_partial_range_falls_back_to_single_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "sample.py"
+            path.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+
+            findings = filter_findings(
+                [make_finding(path=str(path), line=1, end_line=3, suggestion="a = 2\nb = 3")],
+                config=PrrConfig(),
+                root=root,
+                allowed_lines={"sample.py": {1, 2}},
+            )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].line, 1)
+        self.assertIsNone(findings[0].end_line)
+        self.assertIsNone(findings[0].suggestion)
+
+
 if __name__ == "__main__":
     unittest.main()

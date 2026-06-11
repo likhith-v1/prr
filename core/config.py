@@ -36,6 +36,7 @@ class PrrConfig(BaseModel):
     severity_threshold: Literal["info", "warning", "error"] = "info"
     min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     max_comments_per_file: int = Field(default=20, ge=1)
+    max_comments_per_pr: int = Field(default=10, ge=1)
     ignore_paths: list[str] = Field(default_factory=lambda: DEFAULT_IGNORE_PATHS.copy())
 
 

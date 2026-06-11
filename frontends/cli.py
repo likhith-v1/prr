@@ -1,8 +1,9 @@
-"""prr CLI — Week 1: prr review <file>
+"""prr CLI.
 
-Subparser structure leaves room for:
-  prr scan <path>       (Week 2)
-  prr review --pr ...   (Week 3)
+Commands:
+  prr review <file>            review a single local file
+  prr scan <path>              scan a file or directory
+  prr review --pr owner/repo#n post an inline review on a GitHub PR
 """
 
 from __future__ import annotations
@@ -10,7 +11,9 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import sys
+import tempfile
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -20,7 +23,15 @@ from rich.text import Text
 from core.config import ConfigError, PrrConfig, load_config
 from core.context import build_context, findings_for_chunk
 from core.detect_static import run_static_tools
+from core.diff import PatchInfo, parse_patch
 from core.filter import filter_findings
+from core.github_out import (
+    GithubClient,
+    GithubError,
+    build_comment,
+    build_summary,
+    parse_pr_ref,
+)
 from core.ingest import chunk_file
 from core.model import ModelBackendError, review
 from core.schema import Finding, MOOD
@@ -105,8 +116,13 @@ def _review_file(
     config: PrrConfig,
     static_findings: list[Finding],
     root: Path,
+    only_lines: set[int] | None = None,
 ) -> tuple[list[Finding], bool, bool]:
-    """Review one file; returns (findings, ok, had_chunks)."""
+    """Review one file; returns (findings, ok, had_chunks).
+
+    When *only_lines* is given (PR mode), chunks that do not overlap any of
+    those line numbers are skipped.
+    """
     try:
         chunks = chunk_file(path)
     except (OSError, UnicodeDecodeError) as exc:
@@ -119,6 +135,10 @@ def _review_file(
 
     all_findings: list[Finding] = []
     for chunk in chunks:
+        if only_lines is not None and only_lines.isdisjoint(
+            range(chunk.start_line, chunk.end_line + 1)
+        ):
+            continue
         console.print(
             f"  [dim]→ {chunk.kind} [bold]{chunk.name}[/bold]"
             f"  (lines {chunk.start_line}–{chunk.end_line})[/dim]"
@@ -170,6 +190,15 @@ def _render_findings(findings: list[Finding], target: Path) -> int:
 
 
 def cmd_review(args: argparse.Namespace) -> int:
+    if getattr(args, "pr", None):
+        if getattr(args, "file", None):
+            console.print("[red]Pass either a file or --pr, not both.[/red]")
+            return 1
+        return cmd_review_pr(args)
+    if not getattr(args, "file", None):
+        console.print("[red]Pass a Python file to review, or --pr owner/repo#n.[/red]")
+        return 1
+
     config = _load_config_for_args(args)
     if config is None:
         return 1
@@ -197,16 +226,20 @@ def cmd_review(args: argparse.Namespace) -> int:
     return _render_findings(all_findings, path)
 
 
-def _is_ignored(path: Path, root: Path, config: PrrConfig) -> bool:
-    try:
-        rel = path.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
-        rel = path.as_posix()
+def _matches_ignore(rel: str, config: PrrConfig) -> bool:
     # Patterns like ".venv/**" must also catch nested trees ("sub/.venv/...").
     return any(
         fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(rel, f"**/{pattern}")
         for pattern in config.ignore_paths
     )
+
+
+def _is_ignored(path: Path, root: Path, config: PrrConfig) -> bool:
+    try:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        rel = path.as_posix()
+    return _matches_ignore(rel, config)
 
 
 def _collect_python_files(target: Path, config: PrrConfig) -> tuple[Path, list[Path]] | None:
@@ -284,6 +317,207 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return _render_scan_findings(findings, target)
 
 
+# ── PR mode ───────────────────────────────────────────────────────────────────
+
+_SEVERITY_RANK = {"error": 2, "warning": 1, "info": 0}
+_PR_STATIC_TOOLS = ("ruff", "bandit")
+
+
+@dataclass(frozen=True)
+class PrTarget:
+    path: str
+    patch_info: PatchInfo
+
+
+@dataclass(frozen=True)
+class SkippedPrFile:
+    path: str
+    reason: str
+
+
+def _github_client() -> GithubClient:
+    """Seam for tests: patched to inject a fake client."""
+    return GithubClient()
+
+
+def _pr_review_targets(
+    pr_files: list[dict[str, object]],
+    config: PrrConfig,
+) -> tuple[list[PrTarget], list[SkippedPrFile]]:
+    """Select reviewable PR files and track skipped Python files."""
+    targets: list[PrTarget] = []
+    skipped: list[SkippedPrFile] = []
+    for item in pr_files:
+        filename = str(item.get("filename") or "")
+        patch = item.get("patch")
+        if not filename.endswith(".py"):
+            continue
+        if item.get("status") == "removed":
+            skipped.append(SkippedPrFile(filename, "removed file"))
+            continue
+        if _matches_ignore(filename, config):
+            skipped.append(SkippedPrFile(filename, "ignored by config"))
+            continue
+        if not isinstance(patch, str) or not patch:
+            skipped.append(SkippedPrFile(filename, "no usable GitHub patch"))
+            continue
+        patch_info = parse_patch(patch)
+        if not patch_info.added_lines:
+            skipped.append(SkippedPrFile(filename, "no added Python lines"))
+            continue
+        targets.append(PrTarget(filename, patch_info))
+    return targets, skipped
+
+
+def _cap_pr_findings(findings: list[Finding], config: PrrConfig) -> tuple[list[Finding], int]:
+    """Keep the top findings by severity under the per-PR cap."""
+    prioritized = sorted(
+        findings,
+        key=lambda f: (-_SEVERITY_RANK[f.severity], f.path, f.line),
+    )
+    kept = prioritized[: config.max_comments_per_pr]
+    kept.sort(key=lambda f: (f.path, f.line))
+    return kept, len(prioritized) - len(kept)
+
+
+def _run_pr_static_tools(paths: list[Path], root: Path) -> list[Finding]:
+    """Run only file-scoped static tools in temp-workspace PR mode."""
+    return run_static_tools(paths, root=root, tools=_PR_STATIC_TOOLS)
+
+
+def _pr_review_notes(skipped: list[SkippedPrFile]) -> list[str]:
+    notes = [
+        "PR static analysis is file-scoped in this mode; mypy is skipped until full-checkout review is added."
+    ]
+    if skipped:
+        rendered = ", ".join(f"{item.path} ({item.reason})" for item in skipped)
+        notes.append(f"Skipped Python file(s): {rendered}.")
+    return notes
+
+
+def cmd_review_pr(args: argparse.Namespace) -> int:
+    config = _load_config_for_args(args)
+    if config is None:
+        return 1
+
+    try:
+        owner, repo, number = parse_pr_ref(args.pr)
+        client = _github_client()
+    except GithubError as exc:
+        console.print("[red]GitHub error.[/red]")
+        console.print(f"[dim]{exc}[/dim]")
+        return 1
+
+    console.print(f"\n[bold]prr[/bold] reviewing PR [cyan]{owner}/{repo}#{number}[/cyan] …\n")
+
+    try:
+        head_sha = str(client.get_pr(owner, repo, number)["head"]["sha"])
+        pr_files = client.list_pr_files(owner, repo, number)
+    except (GithubError, KeyError, TypeError) as exc:
+        console.print("[red]Could not fetch PR from GitHub.[/red]")
+        console.print(f"[dim]{exc}[/dim]")
+        return 2
+
+    targets, skipped = _pr_review_targets(pr_files, config)
+    notes = _pr_review_notes(skipped)
+    if not targets:
+        console.print("[dim]No reviewable Python files in this PR.[/dim]")
+        for item in skipped:
+            console.print(f"[dim]Skipped {item.path}: {item.reason}.[/dim]")
+        if skipped and not args.dry_run:
+            try:
+                result = client.post_review(
+                    owner,
+                    repo,
+                    number,
+                    build_summary([], notes=notes),
+                    [],
+                )
+            except GithubError as exc:
+                console.print("[red]Could not post review to GitHub.[/red]")
+                console.print(f"[dim]{exc}[/dim]")
+                return 2
+            url = str(result.get("html_url") or "")
+            console.print(f"[green]Review posted.[/green] {url}".rstrip())
+        elif skipped:
+            console.print("[dim]Dry run — review not posted.[/dim]")
+        return 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        local_files: list[Path] = []
+        for target in targets:
+            try:
+                content = client.get_file_content(owner, repo, target.path, head_sha)
+            except GithubError as exc:
+                console.print(f"[red]Could not fetch file from GitHub:[/red] {target.path}")
+                console.print(f"[dim]{exc}[/dim]")
+                return 2
+            local = workspace / target.path
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_text(content, encoding="utf-8")
+            local_files.append(local)
+
+        static_findings = _run_pr_static_tools(local_files, root=workspace)
+
+        llm_findings: list[Finding] = []
+        for target, local in zip(targets, local_files):
+            console.print(f"[dim]file {target.path}[/dim]")
+            found, ok, _ = _review_file(
+                local,
+                config,
+                static_findings,
+                root=workspace,
+                only_lines=target.patch_info.added_lines,
+            )
+            if not ok:
+                return 2
+            llm_findings.extend(found)
+
+        findings = filter_findings(
+            [*static_findings, *llm_findings],
+            config=config,
+            root=workspace,
+            allowed_lines={target.path: target.patch_info.added_lines for target in targets},
+        )
+
+    kept, dropped = _cap_pr_findings(findings, config)
+    comments = [build_comment(finding) for finding in kept]
+    summary = build_summary(kept, dropped_count=dropped, notes=notes)
+
+    console.print()
+    for item in skipped:
+        console.print(f"[yellow]Skipped {item.path}:[/yellow] {item.reason}.")
+    if not kept:
+        console.print(_PURR, style="green")
+    else:
+        console.print(_SWAT, style="red")
+        console.print(
+            f"[bold]{len(kept)} comment(s)[/bold] for [cyan]{owner}/{repo}#{number}[/cyan]\n"
+        )
+        for finding in kept:
+            console.print(f"[bold cyan]{finding.path}[/bold cyan]")
+            _render_finding(finding)
+            console.print()
+
+    has_errors = any(finding.severity == "error" for finding in kept)
+
+    if args.dry_run:
+        console.print("[dim]Dry run — review not posted.[/dim]")
+        return 1 if has_errors else 0
+
+    try:
+        result = client.post_review(owner, repo, number, summary, comments)
+    except GithubError as exc:
+        console.print("[red]Could not post review to GitHub.[/red]")
+        console.print(f"[dim]{exc}[/dim]")
+        return 2
+
+    url = str(result.get("html_url") or "")
+    console.print(f"[green]Review posted.[/green] {url}".rstrip())
+    return 1 if has_errors else 0
+
+
 # ── argument parsing ──────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -293,9 +527,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # prr review <file>
-    p_review = sub.add_parser("review", help="Review a single file")
-    p_review.add_argument("file", help="Python file to review")
+    # prr review <file> | prr review --pr owner/repo#n
+    p_review = sub.add_parser("review", help="Review a single file or a GitHub PR")
+    p_review.add_argument("file", nargs="?", help="Python file to review")
+    p_review.add_argument("--pr", help="GitHub pull request, e.g. owner/repo#123")
+    p_review.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build the PR review but do not post it to GitHub",
+    )
     p_review.add_argument("--config", help="Path to config.yaml")
 
     # prr scan <path>
