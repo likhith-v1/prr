@@ -90,6 +90,18 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(captured["event"], "COMMENT")
         self.assertEqual(captured["body"], "summary")
         self.assertEqual(captured["comments"], comments)
+        self.assertNotIn("commit_id", captured)
+
+    def test_post_review_can_pin_commit_id(self) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"html_url": "https://example/review"})
+
+        make_client(handler).post_review("o", "r", 7, "summary", [], commit_id="abc123")
+
+        self.assertEqual(captured["commit_id"], "abc123")
 
 
 class PayloadTests(unittest.TestCase):

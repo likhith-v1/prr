@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -20,6 +20,8 @@ from core.schema import MOOD, Finding
 _API_VERSION = "2022-11-28"
 _PR_REF = re.compile(r"^(?P<owner>[^/#\s]+)/(?P<repo>[^/#\s]+)#(?P<number>\d+)$")
 _PER_PAGE = 100
+Severity = Literal["info", "warning", "error"]
+_SEVERITIES: tuple[Severity, ...] = ("error", "warning", "info")
 
 
 class GithubError(RuntimeError):
@@ -50,7 +52,7 @@ class GithubClient:
         if not token:
             raise GithubError(
                 "No GitHub token found. Set the GITHUB_TOKEN environment variable "
-                "to a PAT with pull-request access."
+                "to a PAT for local runs, or use the workflow token in GitHub Actions."
             )
         self._client = http_client or httpx.Client(
             base_url=base_url,
@@ -120,11 +122,19 @@ class GithubClient:
         number: int,
         body: str,
         comments: list[dict[str, Any]],
+        commit_id: str | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "body": body,
+            "event": "COMMENT",
+            "comments": comments,
+        }
+        if commit_id is not None:
+            payload["commit_id"] = commit_id
         return self._request(
             "POST",
             f"/repos/{owner}/{repo}/pulls/{number}/reviews",
-            json={"body": body, "event": "COMMENT", "comments": comments},
+            json=payload,
         ).json()
 
 
@@ -172,7 +182,7 @@ def build_summary(
     counts = Counter(finding.severity for finding in findings)
     rendered = ", ".join(
         f"{counts[severity]} {severity}"
-        for severity in ("error", "warning", "info")
+        for severity in _SEVERITIES
         if counts[severity]
     )
     lines = [f"🙀 **prr is not happy** — {rendered or 'see below'}."]

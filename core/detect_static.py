@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 ToolName = Literal["ruff", "mypy", "bandit"]
+_STATIC_TOOL_TIMEOUT_SECONDS = 60
 
 _MYPY_LINE = re.compile(
     r"^(?P<path>.*?):(?P<line>\d+)(?::(?P<column>\d+))?: "
@@ -57,7 +58,7 @@ def _path_args(paths: Iterable[Path], root: Path) -> list[str]:
 
 def _finding(**data: object) -> Finding | None:
     try:
-        return Finding(**data)
+        return Finding.model_validate(data)
     except ValidationError as exc:
         logger.debug("Dropped invalid static finding: %s", exc)
         return None
@@ -211,7 +212,15 @@ def _run_command(args: list[str], root: Path) -> subprocess.CompletedProcess[str
             text=True,
             capture_output=True,
             check=False,
+            timeout=_STATIC_TOOL_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        logger.info(
+            "Static tool timed out after %d seconds: %s",
+            _STATIC_TOOL_TIMEOUT_SECONDS,
+            executable,
+        )
+        return None
     except OSError as exc:
         logger.info("Could not run static tool %s: %s", executable, exc)
         return None

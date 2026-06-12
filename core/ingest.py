@@ -52,6 +52,8 @@ def _definition_name(node: Node) -> str:
     inner = _unwrap_definition(node)
     for child in inner.children:
         if child.type == "identifier":
+            if child.text is None:
+                return "<module>"
             return child.text.decode()
     return "<module>"
 

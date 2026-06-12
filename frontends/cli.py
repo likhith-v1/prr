@@ -4,6 +4,7 @@ Commands:
   prr review <file>            review a single local file
   prr scan <path>              scan a file or directory
   prr review --pr owner/repo#n post an inline review on a GitHub PR
+  prr eval                     run seeded regression eval cases
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from rich.text import Text
 
 from core.config import ConfigError, PrrConfig, load_config
 from core.context import build_context, findings_for_chunk
-from core.detect_static import run_static_tools
+from core.detect_static import ToolName, run_static_tools
 from core.diff import PatchInfo, parse_patch
+from core.eval import EvalError, EvalModelError, EvalReport, run_eval
 from core.filter import filter_findings
 from core.github_out import (
     GithubClient,
@@ -317,10 +319,76 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return _render_scan_findings(findings, target)
 
 
+# ── eval mode ─────────────────────────────────────────────────────────────────
+
+def _render_eval_report(report: EvalReport) -> int:
+    console.print()
+    console.print(
+        "[bold]prr eval[/bold] "
+        f"caught [green]{report.caught_count}/{report.expected_count}[/green] expected issue(s), "
+        f"missed [red]{report.missed_count}[/red], "
+        f"false positives [red]{report.false_positive_count}[/red]."
+    )
+
+    for result in report.cases:
+        status = "[green]pass[/green]" if not result.missed and not result.false_positives else "[red]fail[/red]"
+        console.print(
+            f"\n{status} [bold cyan]{result.case.id}[/bold cyan] "
+            f"({len(result.caught)}/{len(result.case.expected)} caught)"
+        )
+        for missed in result.missed:
+            expected = missed.expected
+            console.print(
+                "[red]missed[/red] "
+                f"line {expected.line} [{expected.category}] "
+                f"min severity {expected.min_severity}"
+            )
+        for false_positive in result.false_positives:
+            finding = false_positive.finding
+            console.print(
+                "[yellow]false positive[/yellow] "
+                f"line {finding.line} [{finding.category}/{finding.severity}] "
+                f"{finding.comment}"
+            )
+
+    return 0 if report.ok else 1
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    config = _load_config_for_args(args)
+    if config is None:
+        return 2
+
+    try:
+        report = run_eval(
+            config=config,
+            cases_path=getattr(args, "cases", None),
+        )
+    except EvalModelError as exc:
+        console.print("[red]Eval failed.[/red]")
+        console.print(f"[dim]{exc}[/dim]")
+        console.print(
+            "[dim]Start Ollama and make sure the model is available: "
+            f"ollama pull {config.model}[/dim]"
+        )
+        if config.ollama_host:
+            console.print(
+                f"[dim]Using ollama_host {config.ollama_host} — confirm it is "
+                "reachable (e.g. from WSL to a Windows/remote GPU host).[/dim]"
+            )
+        return 2
+    except EvalError as exc:
+        console.print("[red]Eval failed.[/red]")
+        console.print(f"[dim]{exc}[/dim]")
+        return 2
+
+    return _render_eval_report(report)
+
+
 # ── PR mode ───────────────────────────────────────────────────────────────────
 
 _SEVERITY_RANK = {"error": 2, "warning": 1, "info": 0}
-_PR_STATIC_TOOLS = ("ruff", "bandit")
+_PR_STATIC_TOOLS: tuple[ToolName, ...] = ("ruff", "bandit")
 
 
 @dataclass(frozen=True)
@@ -338,6 +406,34 @@ class SkippedPrFile:
 def _github_client() -> GithubClient:
     """Seam for tests: patched to inject a fake client."""
     return GithubClient()
+
+
+def _pr_head_sha(pr_data: dict[str, object]) -> str:
+    head = pr_data["head"]
+    if not isinstance(head, dict):
+        raise TypeError("PR response head must be an object")
+    sha = head["sha"]
+    if not isinstance(sha, str) or not sha:
+        raise TypeError("PR response head.sha must be a non-empty string")
+    return sha
+
+
+def _expected_pr_head_sha(args: argparse.Namespace) -> str | None:
+    value = getattr(args, "pr_head_sha", None)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _head_changed(expected_sha: str | None, current_sha: str, pr_ref: str) -> bool:
+    if expected_sha is None or current_sha == expected_sha:
+        return False
+    console.print(
+        "[yellow]Skipping review:[/yellow] "
+        f"{pr_ref} moved from {expected_sha} to {current_sha}."
+    )
+    return True
 
 
 def _pr_review_targets(
@@ -385,6 +481,12 @@ def _run_pr_static_tools(paths: list[Path], root: Path) -> list[Finding]:
     return run_static_tools(paths, root=root, tools=_PR_STATIC_TOOLS)
 
 
+def _pr_exit_code(has_errors: bool, args: argparse.Namespace) -> int:
+    if getattr(args, "no_fail_on_findings", False):
+        return 0
+    return 1 if has_errors else 0
+
+
 def _pr_review_notes(skipped: list[SkippedPrFile]) -> list[str]:
     notes = [
         "PR static analysis is file-scoped in this mode; mypy is skipped until full-checkout review is added."
@@ -408,10 +510,14 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
         console.print(f"[dim]{exc}[/dim]")
         return 1
 
-    console.print(f"\n[bold]prr[/bold] reviewing PR [cyan]{owner}/{repo}#{number}[/cyan] …\n")
+    pr_ref = f"{owner}/{repo}#{number}"
+    expected_head_sha = _expected_pr_head_sha(args)
+    console.print(f"\n[bold]prr[/bold] reviewing PR [cyan]{pr_ref}[/cyan] …\n")
 
     try:
-        head_sha = str(client.get_pr(owner, repo, number)["head"]["sha"])
+        head_sha = _pr_head_sha(client.get_pr(owner, repo, number))
+        if _head_changed(expected_head_sha, head_sha, pr_ref):
+            return 0
         pr_files = client.list_pr_files(owner, repo, number)
     except (GithubError, KeyError, TypeError) as exc:
         console.print("[red]Could not fetch PR from GitHub.[/red]")
@@ -426,15 +532,24 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
             console.print(f"[dim]Skipped {item.path}: {item.reason}.[/dim]")
         if skipped and not args.dry_run:
             try:
+                if expected_head_sha is not None:
+                    latest_head_sha = _pr_head_sha(client.get_pr(owner, repo, number))
+                    if _head_changed(expected_head_sha, latest_head_sha, pr_ref):
+                        return 0
                 result = client.post_review(
                     owner,
                     repo,
                     number,
                     build_summary([], notes=notes),
                     [],
+                    commit_id=head_sha,
                 )
             except GithubError as exc:
                 console.print("[red]Could not post review to GitHub.[/red]")
+                console.print(f"[dim]{exc}[/dim]")
+                return 2
+            except (KeyError, TypeError) as exc:
+                console.print("[red]Could not refresh PR head from GitHub.[/red]")
                 console.print(f"[dim]{exc}[/dim]")
                 return 2
             url = str(result.get("html_url") or "")
@@ -504,18 +619,33 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         console.print("[dim]Dry run — review not posted.[/dim]")
-        return 1 if has_errors else 0
+        return _pr_exit_code(has_errors, args)
 
     try:
-        result = client.post_review(owner, repo, number, summary, comments)
+        if expected_head_sha is not None:
+            latest_head_sha = _pr_head_sha(client.get_pr(owner, repo, number))
+            if _head_changed(expected_head_sha, latest_head_sha, pr_ref):
+                return 0
+        result = client.post_review(
+            owner,
+            repo,
+            number,
+            summary,
+            comments,
+            commit_id=head_sha,
+        )
     except GithubError as exc:
         console.print("[red]Could not post review to GitHub.[/red]")
+        console.print(f"[dim]{exc}[/dim]")
+        return 2
+    except (KeyError, TypeError) as exc:
+        console.print("[red]Could not refresh PR head from GitHub.[/red]")
         console.print(f"[dim]{exc}[/dim]")
         return 2
 
     url = str(result.get("html_url") or "")
     console.print(f"[green]Review posted.[/green] {url}".rstrip())
-    return 1 if has_errors else 0
+    return _pr_exit_code(has_errors, args)
 
 
 # ── argument parsing ──────────────────────────────────────────────────────────
@@ -543,6 +673,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("path", help="Python file or directory to scan")
     p_scan.add_argument("--config", help="Path to config.yaml")
 
+    # prr eval
+    p_eval = sub.add_parser("eval", help="Run seeded regression eval cases")
+    p_eval.add_argument(
+        "--cases",
+        help="Path to an eval cases manifest; defaults to built-in synthetic cases",
+    )
+    p_eval.add_argument("--config", help="Path to config.yaml")
+
     return parser
 
 
@@ -554,6 +692,8 @@ def main() -> None:
         sys.exit(cmd_review(args))
     elif args.command == "scan":
         sys.exit(cmd_scan(args))
+    elif args.command == "eval":
+        sys.exit(cmd_eval(args))
     else:
         parser.print_help()
         sys.exit(1)

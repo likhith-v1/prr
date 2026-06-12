@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from core.detect_static import parse_bandit_json, parse_mypy_text, parse_ruff_json
+from core.detect_static import parse_bandit_json, parse_mypy_text, parse_ruff_json, run_ruff
 
 
 class StaticParserTests(unittest.TestCase):
@@ -111,6 +113,18 @@ class StaticParserTests(unittest.TestCase):
         self.assertEqual(parse_ruff_json("not json"), [])
         self.assertEqual(parse_bandit_json("not json"), [])
         self.assertEqual(parse_mypy_text("not mypy output"), [])
+
+    def test_static_tool_timeout_fails_closed(self) -> None:
+        with (
+            patch("core.detect_static.shutil.which", return_value="/bin/ruff"),
+            patch(
+                "core.detect_static.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["ruff"], timeout=60),
+            ),
+        ):
+            findings = run_ruff([Path("sample.py")], root=Path("."))
+
+        self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":

@@ -9,9 +9,18 @@ from unittest.mock import patch
 
 from rich.console import Console
 
+from core.eval import (
+    CaseEvalResult,
+    EvalCase,
+    EvalError,
+    EvalModelError,
+    EvalReport,
+    ExpectedIssue,
+    MissedIssue,
+)
 from core.model import ModelBackendError
 from core.schema import Finding
-from frontends.cli import cmd_review, cmd_scan
+from frontends.cli import build_parser, cmd_eval, cmd_review, cmd_scan
 
 
 class FakeGithubClient:
@@ -38,8 +47,14 @@ class FakeGithubClient:
         number: int,
         body: str,
         comments: list[dict[str, object]],
+        commit_id: str | None = None,
     ) -> dict[str, object]:
-        self.posted.append({"number": number, "body": body, "comments": comments})
+        self.posted.append({
+            "number": number,
+            "body": body,
+            "comments": comments,
+            "commit_id": commit_id,
+        })
         return {"html_url": "https://example.test/review"}
 
 
@@ -255,6 +270,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(client.fetched, [("pkg/sample.py", "abc123")])
         self.assertEqual(len(client.posted), 1)
         review_payload = client.posted[0]
+        self.assertEqual(review_payload["commit_id"], "abc123")
         self.assertIn("prr is not happy", str(review_payload["body"]))
         comments = review_payload["comments"]
         self.assertEqual(len(comments), 1)
@@ -262,6 +278,125 @@ class CliTests(unittest.TestCase):
         self.assertEqual(comments[0]["line"], 2)
         self.assertEqual(comments[0]["side"], "RIGHT")
         self.assertIn("```suggestion\n    x = int(data)\n```", comments[0]["body"])
+
+    def test_pr_review_can_ignore_findings_for_action_exit_code(self) -> None:
+        client = make_pr_client()
+        output = io.StringIO()
+
+        def fake_review(**kwargs: object) -> list[Finding]:
+            return [
+                Finding(
+                    path=str(kwargs["path"]),
+                    line=2,
+                    severity="error",
+                    category="security",
+                    comment="eval of untrusted input.",
+                    source="llm",
+                    confidence=0.95,
+                )
+            ]
+
+        with (
+            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli.review", side_effect=fake_review),
+            patch("frontends.cli._github_client", return_value=client),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_review(
+                argparse.Namespace(
+                    file=None,
+                    pr="octo/prr#7",
+                    dry_run=False,
+                    config=None,
+                    no_fail_on_findings=True,
+                )
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(client.posted), 1)
+        self.assertIn("prr is not happy", str(client.posted[0]["body"]))
+
+    def test_pr_review_skips_when_triggering_head_is_stale(self) -> None:
+        client = make_pr_client()
+        output = io.StringIO()
+
+        with (
+            patch("frontends.cli._github_client", return_value=client),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_review(
+                argparse.Namespace(
+                    file=None,
+                    pr="octo/prr#7",
+                    dry_run=False,
+                    config=None,
+                    pr_head_sha="old123",
+                )
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(client.fetched, [])
+        self.assertEqual(client.posted, [])
+        self.assertIn("Skipping review", output.getvalue())
+
+    def test_pr_review_skips_post_when_head_moves_during_review(self) -> None:
+        class MovingHeadClient(FakeGithubClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    files=[
+                        {"filename": "pkg/sample.py", "status": "modified", "patch": _PR_PATCH}
+                    ],
+                    contents={"pkg/sample.py": _PR_CONTENT},
+                )
+                self.heads = ["abc123", "new456"]
+
+            def get_pr(self, owner: str, repo: str, number: int) -> dict[str, object]:
+                return {"head": {"sha": self.heads.pop(0)}}
+
+        client = MovingHeadClient()
+        output = io.StringIO()
+
+        def fake_review(**kwargs: object) -> list[Finding]:
+            return [
+                Finding(
+                    path=str(kwargs["path"]),
+                    line=2,
+                    severity="error",
+                    category="security",
+                    comment="eval of untrusted input.",
+                    source="llm",
+                    confidence=0.95,
+                )
+            ]
+
+        with (
+            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli.review", side_effect=fake_review),
+            patch("frontends.cli._github_client", return_value=client),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_review(
+                argparse.Namespace(
+                    file=None,
+                    pr="octo/prr#7",
+                    dry_run=False,
+                    config=None,
+                    pr_head_sha="abc123",
+                )
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(client.posted, [])
+        self.assertIn("Skipping review", output.getvalue())
 
     def test_pr_review_drops_findings_outside_diff(self) -> None:
         client = make_pr_client()
@@ -375,6 +510,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(len(client.posted), 1)
+        self.assertEqual(client.posted[0]["commit_id"], "abc123")
         self.assertEqual(client.posted[0]["comments"], [])
         self.assertIn("big.py", str(client.posted[0]["body"]))
         self.assertIn("Review posted", output.getvalue())
@@ -440,6 +576,81 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("Config error", output.getvalue())
+
+    def test_parser_accepts_eval_command(self) -> None:
+        args = build_parser().parse_args([
+            "eval",
+            "--cases",
+            "cases.yaml",
+            "--config",
+            "config.yaml",
+        ])
+
+        self.assertEqual(args.command, "eval")
+        self.assertEqual(args.cases, "cases.yaml")
+        self.assertEqual(args.config, "config.yaml")
+
+    def test_eval_command_reports_regression_exit_code(self) -> None:
+        expected = ExpectedIssue(line=2, category="bug", min_severity="warning")
+        report = EvalReport([
+            CaseEvalResult(
+                case=EvalCase(
+                    id="sample",
+                    path="sample.py",
+                    source="sample.py.txt",
+                    expected=[expected],
+                ),
+                findings=[],
+                caught=[],
+                missed=[MissedIssue("sample", expected)],
+                false_positives=[],
+            )
+        ])
+        output = io.StringIO()
+
+        with (
+            patch("frontends.cli.run_eval", return_value=report),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_eval(argparse.Namespace(cases=None, config=None))
+
+        self.assertEqual(result, 1)
+        self.assertIn("missed 1", output.getvalue())
+
+    def test_eval_command_reports_runtime_failure(self) -> None:
+        output = io.StringIO()
+
+        with (
+            patch("frontends.cli.run_eval", side_effect=EvalError("boom")),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_eval(argparse.Namespace(cases=None, config=None))
+
+        self.assertEqual(result, 2)
+        self.assertIn("Eval failed", output.getvalue())
+
+    def test_eval_command_reports_model_failure_with_ollama_hint(self) -> None:
+        output = io.StringIO()
+
+        with (
+            patch("frontends.cli.run_eval", side_effect=EvalModelError("no ollama")),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_eval(argparse.Namespace(cases=None, config=None))
+
+        rendered = output.getvalue()
+        self.assertEqual(result, 2)
+        self.assertIn("Eval failed", rendered)
+        self.assertIn("ollama pull qwen2.5-coder:14b", rendered)
 
 
 if __name__ == "__main__":

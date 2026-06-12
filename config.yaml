@@ -3,6 +3,7 @@ model: qwen2.5-coder:14b
 severity_threshold: info
 min_confidence: 0.7
 max_comments_per_file: 20
+max_comments_per_pr: 10
 ignore_paths:
   - .git/**
   - .venv/**

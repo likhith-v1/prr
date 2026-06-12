@@ -8,7 +8,8 @@ Current status:
 - Implemented: `prr review <file>`
 - Implemented: `prr scan <path>`
 - Implemented: `prr review --pr owner/repo#n` (GitHub PR inline review comments)
-- Planned: self-hosted GitHub Actions runner integration
+- Implemented: `prr eval` seeded regression checks for model swaps
+- Implemented: self-hosted GitHub Actions runner integration
 
 ## Requirements
 
@@ -46,6 +47,12 @@ Review a GitHub pull request (posts one batched inline review):
 export GITHUB_TOKEN=...   # PAT with pull-request access
 uv run prr review --pr owner/repo#123 --dry-run   # preview without posting
 uv run prr review --pr owner/repo#123             # post the review
+```
+
+Run the seeded eval before and after changing models:
+
+```bash
+uv run prr eval
 ```
 
 Run tests and lint:
@@ -134,7 +141,8 @@ Core modules:
   diff-line restriction in PR mode
 - `core/diff.py`: GitHub patch parsing into added/commentable line sets
 - `core/github_out.py`: GitHub REST client and review payload builders
-- `frontends/cli.py`: `review` (file or `--pr`) and `scan` commands
+- `core/eval.py`: seeded regression eval runner for model swaps
+- `frontends/cli.py`: `review` (file or `--pr`), `scan`, and `eval` commands
 
 ## Output Rules
 
@@ -175,9 +183,48 @@ batched review:
 Authentication uses a PAT from the `GITHUB_TOKEN` environment variable.
 Use `--dry-run` to inspect the review without posting.
 
-The intended deployment model is a self-hosted GitHub Actions runner on the
-machine that can reach Ollama. Use trusted/private repositories only; a
-self-hosted runner executes repository code on that machine.
+## GitHub Actions Automation
+
+`.github/workflows/review.yml` runs prr on `pull_request` opened, synchronize,
+and reopened events using a self-hosted runner labeled `self-hosted` and `gpu`.
+Install that runner on the machine that can reach Ollama, ideally as a service
+so it survives reboots.
+
+The workflow checks out the trusted base commit before running prr, then reviews
+the exact PR head SHA from the event payload. It uses the repository-scoped
+Actions `GITHUB_TOKEN` to post reviews, not a personal token. It intentionally
+keeps the Actions check green when prr finds code issues; the check fails only
+for runtime failures such as missing configuration, GitHub API errors, model
+backend failures, or failed review posting.
+
+Use trusted/private repositories only. A self-hosted runner executes repository
+code on your machine. The bundled workflow only runs for same-repository PRs and
+skips fork PRs by default.
+
+## Seeded Eval And Model Swaps
+
+`prr eval` runs the normal review pipeline over small synthetic cases stored as
+package fixtures. The source files are stored as `.py.txt`, then materialized in
+a temporary workspace, so `prr scan .` does not review intentionally-buggy eval
+fixtures.
+
+The eval reports caught expected issues, missed expected issues, and false
+positives. To stay robust against incidental static-analysis noise — for example
+bandit's low-severity `B404` finding on any `import subprocess` — only `warning`-
+and `error`-severity findings outside the expected set count as false positives;
+`info`-severity findings are treated as tolerated noise and never fail a case.
+
+Exit codes:
+
+- `0`: eval completed with no misses or false positives
+- `1`: eval completed but found a regression
+- `2`: config, case loading, model, or runtime failure
+
+Model swap procedure:
+
+1. Change `model:` in `config.yaml`.
+2. Run `uv run prr eval`.
+3. Keep the new model only if the eval improves or holds steady.
 
 ## Development Roadmap
 

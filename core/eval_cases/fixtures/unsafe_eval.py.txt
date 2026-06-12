@@ -1,0 +1,2 @@
+def parse_user_number(data: str) -> int:
+    return eval(data)
