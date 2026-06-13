@@ -6,6 +6,7 @@ max_comments_per_file: 20
 max_comments_per_pr: 10
 ignore_paths:
   - .git/**
+  - litter/**
   - .venv/**
   - .uv-cache/**
   - .pytest_cache/**
