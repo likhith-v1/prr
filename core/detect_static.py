@@ -136,7 +136,7 @@ def parse_mypy_text(raw: str, root: Path | None = None) -> list[Finding]:
         finding = _finding(
             path=_relative_path(match.group("path"), root),
             line=int(match.group("line")),
-            severity="info" if level == "note" else "error",
+            severity="info" if level == "note" else ("warning" if level == "warning" else "error"),
             category="bug",
             comment=f"mypy {level}: {message}",
             source="mypy",
