@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.detect_static import parse_bandit_json, parse_mypy_text, parse_ruff_json, run_ruff
+from core.detect_static import (
+    parse_bandit_json,
+    parse_mypy_text,
+    parse_ruff_json,
+    run_ruff,
+    run_static_tools,
+)
 
 
 class StaticParserTests(unittest.TestCase):
@@ -116,15 +122,43 @@ class StaticParserTests(unittest.TestCase):
 
     def test_static_tool_timeout_fails_closed(self) -> None:
         with (
-            patch("core.detect_static.shutil.which", return_value="/bin/ruff"),
+            patch("core.detect_static._resolve_executable", return_value="/bin/ruff"),
             patch(
                 "core.detect_static.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(["ruff"], timeout=60),
             ),
         ):
-            findings = run_ruff([Path("sample.py")], root=Path("."))
+            findings, warning = run_ruff([Path("sample.py")], root=Path("."))
 
         self.assertEqual(findings, [])
+        self.assertIn("timed out", warning or "")
+
+    def test_run_static_tools_reports_missing_tools(self) -> None:
+        with patch("core.detect_static._resolve_executable", return_value=None):
+            result = run_static_tools([Path("sample.py")], root=Path("."))
+
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.warnings), 3)
+        self.assertTrue(all("not found" in warning for warning in result.warnings))
+
+    def test_resolve_executable_falls_back_to_interpreter_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "bin"
+            bindir.mkdir()
+            tool = bindir / "ruff"
+            tool.write_text("#!/bin/sh\n", encoding="utf-8")
+            tool.chmod(0o755)
+            fake_python = bindir / "python"
+            fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+
+            with (
+                patch("core.detect_static.shutil.which", return_value=None),
+                patch("core.detect_static.sys.executable", str(fake_python)),
+            ):
+                from core.detect_static import _resolve_executable
+
+                self.assertEqual(_resolve_executable("ruff"), str(tool))
 
 
 if __name__ == "__main__":

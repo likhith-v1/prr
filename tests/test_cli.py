@@ -75,6 +75,27 @@ def make_pr_client() -> FakeGithubClient:
 
 
 class CliTests(unittest.TestCase):
+    def test_review_warns_when_static_tools_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.py"
+            path.write_text("x = 1\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with (
+                patch("core.detect_static._resolve_executable", return_value=None),
+                patch("frontends.cli.review", return_value=[]),
+                patch(
+                    "frontends.cli.console",
+                    Console(file=output, force_terminal=False, color_system=None),
+                ),
+            ):
+                result = cmd_review(argparse.Namespace(file=str(path), config=None))
+
+        rendered = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("Static analysis skipped", rendered)
+        self.assertIn("ruff not found", rendered)
+
     def test_model_backend_error_is_user_facing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sample.py"
@@ -82,7 +103,7 @@ class CliTests(unittest.TestCase):
             output = io.StringIO()
 
             with (
-                patch("frontends.cli.run_static_tools", return_value=[]),
+                patch("frontends.cli._run_static_tools", return_value=[]),
                 patch("frontends.cli.review", side_effect=ModelBackendError("no ollama")),
                 patch(
                     "frontends.cli.console",
@@ -125,7 +146,7 @@ class CliTests(unittest.TestCase):
                 return []
 
             with (
-                patch("frontends.cli.run_static_tools", return_value=[]),
+                patch("frontends.cli._run_static_tools", return_value=[]),
                 patch("frontends.cli.review", side_effect=fake_review),
                 patch(
                     "frontends.cli.console",
@@ -154,7 +175,7 @@ class CliTests(unittest.TestCase):
             output = io.StringIO()
 
             with (
-                patch("frontends.cli.run_static_tools", return_value=[static]),
+                patch("frontends.cli._run_static_tools", return_value=[static]),
                 patch("frontends.cli.review", return_value=[]),
                 patch(
                     "frontends.cli.console",
@@ -194,7 +215,7 @@ class CliTests(unittest.TestCase):
                 return []
 
             with (
-                patch("frontends.cli.run_static_tools", side_effect=fake_static),
+                patch("frontends.cli._run_static_tools", side_effect=fake_static),
                 patch("frontends.cli.review", side_effect=fake_review),
                 patch(
                     "frontends.cli.console",
@@ -254,7 +275,7 @@ class CliTests(unittest.TestCase):
             ]
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", side_effect=fake_review),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -297,7 +318,7 @@ class CliTests(unittest.TestCase):
             ]
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", side_effect=fake_review),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -376,7 +397,7 @@ class CliTests(unittest.TestCase):
             ]
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", side_effect=fake_review),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -429,7 +450,7 @@ class CliTests(unittest.TestCase):
             ]
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", side_effect=fake_review),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -469,7 +490,7 @@ class CliTests(unittest.TestCase):
             ]
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", side_effect=fake_review),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -505,7 +526,7 @@ class CliTests(unittest.TestCase):
             ]
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", side_effect=fake_review),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -525,7 +546,7 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", return_value=[]),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -577,7 +598,7 @@ class CliTests(unittest.TestCase):
             return []
 
         with (
-            patch("frontends.cli.run_static_tools", side_effect=fake_static),
+            patch("frontends.cli._run_static_tools", side_effect=fake_static),
             patch("frontends.cli.review", return_value=[]),
             patch("frontends.cli._github_client", return_value=client),
             patch(
@@ -597,7 +618,7 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", return_value=[]),
             patch("frontends.cli._github_client", return_value=client),
             patch(

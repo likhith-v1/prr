@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from core.config import PrrConfig
+from core.detect_static import StaticToolsResult
 from core.eval import EvalError, EvalModelError, load_eval_cases, run_eval
 from core.model import ModelBackendError
 from core.schema import Finding
@@ -95,7 +96,7 @@ class EvalTests(unittest.TestCase):
                 PrrConfig(),
                 cases_path=manifest,
                 review_func=fake_review,
-                static_func=lambda paths, root: [],
+                static_func=lambda paths, root: StaticToolsResult(findings=[]),
             )
 
         self.assertTrue(report.ok)
@@ -135,7 +136,7 @@ class EvalTests(unittest.TestCase):
                 PrrConfig(),
                 cases_path=manifest,
                 review_func=fake_review,
-                static_func=lambda paths, root: [],
+                static_func=lambda paths, root: StaticToolsResult(findings=[]),
             )
 
         self.assertFalse(report.ok)
@@ -166,7 +167,7 @@ class EvalTests(unittest.TestCase):
                     PrrConfig(),
                     cases_path=manifest,
                     review_func=fake_review,
-                    static_func=lambda paths, root: [],
+                    static_func=lambda paths, root: StaticToolsResult(findings=[]),
                 )
 
         self.assertIsInstance(ctx.exception, EvalModelError)
@@ -200,8 +201,8 @@ class EvalTests(unittest.TestCase):
                     )
                 ]
 
-            def fake_static(paths: list[Path], root: Path) -> list[Finding]:
-                return [
+            def fake_static(paths: list[Path], root: Path) -> StaticToolsResult:
+                return StaticToolsResult(findings=[
                     Finding(
                         path=str(paths[0]),
                         line=1,
@@ -210,7 +211,7 @@ class EvalTests(unittest.TestCase):
                         comment="B404: incidental import noise.",
                         source="bandit",
                     )
-                ]
+                ])
 
             report = run_eval(
                 PrrConfig(),

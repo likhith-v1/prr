@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from core.config import PrrConfig
 from core.context import build_context, findings_for_chunk
-from core.detect_static import run_static_tools
+from core.detect_static import StaticToolsResult, run_static_tools
 from core.filter import filter_findings
 from core.ingest import chunk_file
 from core.model import ModelBackendError, review
@@ -129,7 +129,7 @@ class EvalReport:
 
 
 ReviewFunc = Callable[..., list[Finding]]
-StaticFunc = Callable[..., list[Finding]]
+StaticFunc = Callable[..., StaticToolsResult]
 
 
 def _default_cases_root() -> TraversableText:
@@ -230,7 +230,8 @@ def _run_case(
     except (OSError, UnicodeDecodeError) as exc:
         raise EvalError(f"Could not chunk eval case {case.id}: {exc}") from exc
 
-    static_findings = static_func([target], root=case_root)
+    static_result = static_func([target], root=case_root)
+    static_findings = static_result.findings
 
     llm_findings: list[Finding] = []
     for chunk in chunks:

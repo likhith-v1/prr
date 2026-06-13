@@ -7,6 +7,8 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -200,11 +202,31 @@ def parse_bandit_json(raw: str, root: Path | None = None) -> list[Finding]:
     return findings
 
 
-def _run_command(args: list[str], root: Path) -> subprocess.CompletedProcess[str] | None:
+def _resolve_executable(name: str) -> str | None:
+    """Resolve a static tool on PATH or in the active environment's bin directory."""
+    found = shutil.which(name)
+    if found is not None:
+        return found
+    for directory in (Path(sys.executable).parent, Path(sys.prefix) / "bin"):
+        candidate = directory / name
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _run_command(
+    args: list[str],
+    root: Path,
+) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
     executable = args[0]
-    if shutil.which(executable) is None:
+    resolved = _resolve_executable(executable)
+    if resolved is None:
         logger.info("Static tool not found: %s", executable)
-        return None
+        return None, (
+            f"{executable} not found on PATH or next to the current Python interpreter"
+        )
+    if resolved != executable:
+        args = [resolved, *args[1:]]
     try:
         return subprocess.run(
             args,
@@ -213,28 +235,42 @@ def _run_command(args: list[str], root: Path) -> subprocess.CompletedProcess[str
             capture_output=True,
             check=False,
             timeout=_STATIC_TOOL_TIMEOUT_SECONDS,
-        )
+        ), None
     except subprocess.TimeoutExpired:
         logger.info(
             "Static tool timed out after %d seconds: %s",
             _STATIC_TOOL_TIMEOUT_SECONDS,
             executable,
         )
-        return None
+        return None, (
+            f"{executable} timed out after {_STATIC_TOOL_TIMEOUT_SECONDS} seconds"
+        )
     except OSError as exc:
         logger.info("Could not run static tool %s: %s", executable, exc)
-        return None
+        return None, f"could not run {executable}: {exc}"
 
 
-def run_ruff(paths: Iterable[Path], root: Path) -> list[Finding]:
+@dataclass(frozen=True)
+class StaticToolsResult:
+    findings: list[Finding]
+    warnings: tuple[str, ...] = ()
+
+
+def run_ruff(
+    paths: Iterable[Path],
+    root: Path,
+) -> tuple[list[Finding], str | None]:
     args = ["ruff", "check", "--output-format", "json", *_path_args(paths, root)]
-    result = _run_command(args, root)
+    result, warning = _run_command(args, root)
     if result is None:
-        return []
-    return parse_ruff_json(result.stdout, root=root)
+        return [], warning
+    return parse_ruff_json(result.stdout, root=root), None
 
 
-def run_mypy(paths: Iterable[Path], root: Path) -> list[Finding]:
+def run_mypy(
+    paths: Iterable[Path],
+    root: Path,
+) -> tuple[list[Finding], str | None]:
     args = [
         "mypy",
         "--hide-error-context",
@@ -242,38 +278,51 @@ def run_mypy(paths: Iterable[Path], root: Path) -> list[Finding]:
         "--show-error-codes",
         *_path_args(paths, root),
     ]
-    result = _run_command(args, root)
+    result, warning = _run_command(args, root)
     if result is None:
-        return []
-    return parse_mypy_text(result.stdout, root=root)
+        return [], warning
+    return parse_mypy_text(result.stdout, root=root), None
 
 
-def run_bandit(paths: Iterable[Path], root: Path) -> list[Finding]:
+def run_bandit(
+    paths: Iterable[Path],
+    root: Path,
+) -> tuple[list[Finding], str | None]:
     args = ["bandit", "-f", "json", "--quiet", *_path_args(paths, root)]
-    result = _run_command(args, root)
+    result, warning = _run_command(args, root)
     if result is None:
-        return []
+        return [], warning
     raw = result.stdout or result.stderr
-    return parse_bandit_json(raw, root=root)
+    return parse_bandit_json(raw, root=root), None
 
 
 def run_static_tools(
     paths: Iterable[str | Path],
     root: str | Path = ".",
     tools: Iterable[ToolName] = ("ruff", "mypy", "bandit"),
-) -> list[Finding]:
-    """Run configured static tools and return all normalized findings."""
+) -> StaticToolsResult:
+    """Run configured static tools and return normalized findings plus skip warnings."""
     root_path = Path(root)
     path_list = [Path(path) for path in paths]
     if not path_list:
-        return []
+        return StaticToolsResult(findings=[])
 
     findings: list[Finding] = []
+    warnings: list[str] = []
     requested = set(tools)
     if "ruff" in requested:
-        findings.extend(run_ruff(path_list, root_path))
+        tool_findings, warning = run_ruff(path_list, root_path)
+        findings.extend(tool_findings)
+        if warning is not None:
+            warnings.append(warning)
     if "mypy" in requested:
-        findings.extend(run_mypy(path_list, root_path))
+        tool_findings, warning = run_mypy(path_list, root_path)
+        findings.extend(tool_findings)
+        if warning is not None:
+            warnings.append(warning)
     if "bandit" in requested:
-        findings.extend(run_bandit(path_list, root_path))
-    return findings
+        tool_findings, warning = run_bandit(path_list, root_path)
+        findings.extend(tool_findings)
+        if warning is not None:
+            warnings.append(warning)
+    return StaticToolsResult(findings=findings, warnings=tuple(warnings))

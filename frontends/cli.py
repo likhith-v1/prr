@@ -211,7 +211,7 @@ def cmd_review(args: argparse.Namespace) -> int:
 
     console.print(f"\n[bold]prr[/bold] reviewing [cyan]{path}[/cyan] …\n")
 
-    static_findings = run_static_tools([path], root=Path.cwd())
+    static_findings = _run_static_tools([path], root=Path.cwd())
     llm_findings, ok, had_chunks = _review_file(path, config, static_findings, root=Path.cwd())
     if not ok:
         return 2
@@ -301,7 +301,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 0
 
     console.print(f"\n[bold]prr[/bold] scanning [cyan]{target}[/cyan] …\n")
-    static_findings = run_static_tools(files, root=root)
+    static_findings = _run_static_tools(files, root=root)
 
     llm_findings: list[Finding] = []
     for path in files:
@@ -491,9 +491,22 @@ def _cap_pr_findings(findings: list[Finding], config: PrrConfig) -> tuple[list[F
     return kept, len(prioritized) - len(kept)
 
 
-def _run_pr_static_tools(paths: list[Path], root: Path) -> list[Finding]:
-    """Run only file-scoped static tools in temp-workspace PR mode."""
-    return run_static_tools(paths, root=root, tools=_PR_STATIC_TOOLS)
+def _print_static_tool_warnings(warnings: tuple[str, ...]) -> None:
+    for warning in warnings:
+        console.print(f"[yellow]Static analysis skipped:[/yellow] {warning}")
+
+
+def _run_static_tools(
+    paths: list[Path],
+    root: Path,
+    tools: tuple[ToolName, ...] | None = None,
+) -> list[Finding]:
+    if tools is None:
+        result = run_static_tools(paths, root=root)
+    else:
+        result = run_static_tools(paths, root=root, tools=tools)
+    _print_static_tool_warnings(result.warnings)
+    return result.findings
 
 
 def _pr_exit_code(has_errors: bool, args: argparse.Namespace) -> int:
@@ -604,7 +617,7 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
             local.write_text(content, encoding="utf-8")
             local_files.append(local)
 
-        static_findings = _run_pr_static_tools(local_files, root=workspace)
+        static_findings = _run_static_tools(local_files, root=workspace, tools=_PR_STATIC_TOOLS)
 
         llm_findings: list[Finding] = []
         for target, local in zip(targets, local_files):

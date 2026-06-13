@@ -84,7 +84,7 @@ class ActionEntryTests(unittest.TestCase):
             ]
 
         with (
-            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli._run_static_tools", return_value=[]),
             patch("frontends.cli.review", side_effect=fake_review),
             patch("frontends.cli._github_client", return_value=client),
             patch(
