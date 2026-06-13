@@ -8,14 +8,14 @@
 PR review only looks at the **diff**, not the whole repo, so it's naturally bounded and fast. The fiddly part is mapping findings to GitHub's diff-line model — get that right and the bot feels real.
 
 ## Tasks
-- [ ] `core/ingest.py` — diff parsing: fetch the PR's changed files + hunks; review only **changed lines + N lines of context**; record each line's diff position / `line` + `side` (needed by the review API).
-- [ ] Extend `filter.py` — in PR mode, also drop findings whose line **isn't part of the diff** (GitHub rejects comments on unchanged lines unless explicitly ranged).
-- [ ] `core/github_out.py` — build and post **one** review:
+- [x] `core/diff.py` (instead of `core/ingest.py` — ingest stays tree-sitter-only) — parse each PR file's `patch` into `added_lines` (drives which chunks get reviewed) and `commentable_lines` (`line` + `side="RIGHT"` validity for the review API). Full files are fetched at the head SHA into a temp workspace so Week 1–2 chunking/static/filter code runs unchanged.
+- [x] Extend `filter.py` — `filter_findings(..., allowed_lines=...)` drops findings whose line **isn't an added line** in PR mode; ranges that partially leave the diff fall back to a single-line anchor without a suggestion.
+- [x] `core/github_out.py` — build and post **one** review:
   - `POST /repos/{owner}/{repo}/pulls/{n}/reviews` with `comments[]`.
   - Each comment: `path`, `line` (+ `start_line` for ranges), `side`, `body`. Prefix the body with the mood for the finding's severity (chirp / hiss / swat).
   - Render `suggestion` as a fenced ` ```suggestion ` block so it's one-click-appliable.
   - Add a summary comment: the cat's verdict (`prr is purring` when clean, otherwise `prr is not happy`) + counts by severity + a one-line note.
-- [ ] `frontends/cli.py` — `prr review --pr owner/repo#n`: fetch diff via REST (PAT from env) → review changed hunks (reuse Week 1–2 core) → filter → `github_out.post`.
+- [x] `frontends/cli.py` — `prr review --pr owner/repo#n [--dry-run]`: fetch diff via REST (PAT from `GITHUB_TOKEN`) → review chunks overlapping added lines (reuse Week 1–2 core) → filter to added lines only → cap via `max_comments_per_pr` (default 10) → `post_review`. PR static analysis is file-scoped (`ruff` + `bandit`); skipped Python files are noted.
 
 ## Deliverables
 - Diff parsing + diff-aware line filtering.
@@ -26,6 +26,7 @@ PR review only looks at the **diff**, not the whole repo, so it's naturally boun
 - Inline comments land on the exact changed lines, never off-by-one.
 - Suggestion blocks apply cleanly with GitHub's "commit suggestion" button.
 - No 422 errors from out-of-diff comment positions.
+- No comments are posted on unchanged context lines in v1.
 - A clean PR gets a single purring summary and no inline noise.
 
 ## Notes / gotchas

@@ -1,0 +1,29 @@
+cases:
+  - id: unsafe-eval
+    path: unsafe_eval.py
+    source: fixtures/unsafe_eval.py.txt
+    expected:
+      - line: 2
+        category: security
+        min_severity: error
+  - id: zero-division
+    path: zero_division.py
+    source: fixtures/zero_division.py.txt
+    expected:
+      - line: 2
+        category: bug
+        min_severity: warning
+  - id: mutable-default
+    path: mutable_default.py
+    source: fixtures/mutable_default.py.txt
+    expected:
+      - line: 1
+        category: bug
+        min_severity: warning
+  - id: subprocess-shell
+    path: subprocess_shell.py
+    source: fixtures/subprocess_shell.py.txt
+    expected:
+      - line: 5
+        category: security
+        min_severity: warning

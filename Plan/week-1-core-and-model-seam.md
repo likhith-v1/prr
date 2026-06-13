@@ -12,18 +12,18 @@ Freeze the two things everything else depends on: the **Finding schema** (the co
 - [ ] `core/schema.py` — define the Pydantic `Finding` model exactly as in the README. This is frozen from here on.
 - [ ] Pull the model in Ollama and confirm JSON mode works:
   ```bash
-  ollama pull qwen3-coder   # or devstral
+  ollama pull qwen2.5-coder:14b
   ```
 - [ ] `core/model.py` — **the seam.** Single entry point:
   ```python
   def review(code: str, path: str, context: str = "", findings: list[Finding] = []) -> list[Finding]: ...
   ```
-  - Ollama backend, `format="json"`.
-  - Build the prompt (next bullet), call, parse JSON into `list[Finding]`, validate with Pydantic.
+  - Ollama backend, schema-guided `format`.
+  - Build the prompt (next bullet), call, parse `{"findings": [...]}` JSON into `list[Finding]`, validate with Pydantic.
   - On parse failure: retry once with a "return valid JSON only" nudge, then drop.
   - Keep the backend behind a tiny interface so vLLM/another model swaps in later without touching callers.
 - [ ] `core/prompts/review.txt` — system prompt. Must enforce:
-  - Role: terse senior reviewer. Output **JSON array only**, no prose.
+  - Role: terse senior reviewer. Output **JSON object only**: `{"findings": [...]}`, no prose.
   - Each finding must **quote the exact offending line** (used later to validate it exists).
   - Severity rubric (error = likely bug/security; warning = real smell; info = minor).
   - **Only flag real issues. Do not nitpick. Prefer fewer, higher-confidence findings.** (A noisy cat gets muted.)

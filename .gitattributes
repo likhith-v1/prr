@@ -1,0 +1,10 @@
+# Normalize line endings to LF across all platforms (Mac, Linux, WSL2, Windows).
+# Keeps test fixtures, prompts, and config byte-identical regardless of checkout.
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.txt   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+uv.lock text eol=lf
