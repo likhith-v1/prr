@@ -145,7 +145,7 @@ def filter_findings(
     """Validate, deduplicate, threshold, cap, and sort findings.
 
     When *allowed_lines* is given (PR mode), it maps root-relative posix paths
-    to the set of diff-commentable line numbers; findings outside it are dropped.
+    to the set of allowed line numbers (e.g. added lines only); findings outside it are dropped.
     """
     root_path = Path(root)
     line_cache: dict[Path, int] = {}
