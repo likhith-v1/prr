@@ -81,13 +81,11 @@ uv run prr review --pr owner/repo#123 --dry-run   # preview without posting
 uv run prr review --pr owner/repo#123             # post the review
 ```
 
-With [GitHub CLI](https://cli.github.com/) authenticated, you can skip setting
-`GITHUB_TOKEN` manually:
+With [GitHub CLI](https://cli.github.com/) authenticated, you can populate `GITHUB_TOKEN` from it:
 
-```bash
-gh auth login
-gh auth setup-git
-uv run prr review --pr owner/repo#123
+    gh auth login
+    export GITHUB_TOKEN="$(gh auth token)"
+    uv run prr review --pr owner/repo#123
 ```
 
 ### Run the seeded eval
