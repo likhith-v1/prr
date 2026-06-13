@@ -1,78 +1,107 @@
 # prr
 
-`prr` is a local Python code-review CLI backed by an Ollama model. It reviews
-individual files, scans Python projects, combines deterministic tool findings
-with LLM review, and filters output before showing it to the user.
+A local Python code-review CLI that pairs static analysis with an Ollama model.
+Review a file, scan a project, or post inline comments on a GitHub pull request —
+all from your machine, with no cloud API keys required for the review brain.
 
-Current status:
-- Implemented: `prr review <file>`
-- Implemented: `prr scan <path>`
-- Implemented: `prr review --pr owner/repo#n` (GitHub PR inline review comments)
-- Implemented: `prr eval` seeded regression checks for model swaps
-- Implemented: self-hosted GitHub Actions runner integration
+`prr` runs **ruff**, **mypy**, and **bandit**, feeds their findings into an LLM
+chunk-by-chunk, validates everything against a shared schema, and renders
+cat-themed output in the terminal or on GitHub.
+
+## Features
+
+- **Single-file review** — `prr review <file>`
+- **Project scan** — `prr scan <path>` with configurable ignore globs
+- **GitHub PR reviews** — `prr review --pr owner/repo#n` posts one batched inline
+  review with optional one-click suggestions
+- **Seeded eval** — `prr eval` regression checks when swapping models
+- **GitHub Actions** — optional self-hosted workflow for automatic PR review
+- **Fail-closed output** — unparseable or unanchored model findings are dropped,
+  not trusted blindly
 
 ## Requirements
 
-- macOS, native Linux, or WSL2
+- macOS, native Linux, or WSL2 (native Windows is not supported — use WSL2)
 - Python 3.11+
-- `uv`
-- Ollama with the configured model available
+- [uv](https://docs.astral.sh/uv/)
+- [Ollama](https://ollama.com/) with the configured model pulled locally
 
-Native Windows is not supported. Use WSL2 on Windows.
+Static tools (`ruff`, `mypy`, `bandit`) are installed as Python dependencies and
+are available through `uv run`; you do not need separate system installs.
 
-## Setup
+## Quick start
 
-Install dependencies and pull the default model:
+Clone the repo, install dependencies, and pull the default model:
 
 ```bash
+git clone https://github.com/likhith-v1/prr.git
+cd prr
 ollama pull qwen2.5-coder:14b
 uv sync --extra test
 ```
 
-Review a single Python file:
+Try the bundled sample file:
 
 ```bash
 uv run prr review sample.py
 ```
 
-Scan a Python file or directory:
+Scan the project:
 
 ```bash
 uv run prr scan .
 ```
 
-Review a GitHub pull request (posts one batched inline review):
+## Usage
+
+### Review one file
 
 ```bash
-export GITHUB_TOKEN=...   # PAT with pull-request access
+uv run prr review path/to/file.py
+```
+
+### Scan a file or directory
+
+```bash
+uv run prr scan .
+uv run prr scan src/
+```
+
+Ignored paths come from `config.yaml` (defaults include `.venv/`, `__pycache__/`,
+and other build/cache directories).
+
+### Review a GitHub pull request
+
+Fetches changed Python files at the PR head, reviews only added lines, and posts
+**one** batched review with inline comments and a summary.
+
+```bash
+export GITHUB_TOKEN=...   # PAT with pull-request access, or use `gh auth setup-git`
 uv run prr review --pr owner/repo#123 --dry-run   # preview without posting
 uv run prr review --pr owner/repo#123             # post the review
 ```
 
-Run the seeded eval before and after changing models:
+With [GitHub CLI](https://cli.github.com/) authenticated, you can skip setting
+`GITHUB_TOKEN` manually:
+
+```bash
+gh auth login
+gh auth setup-git
+uv run prr review --pr owner/repo#123
+```
+
+### Run the seeded eval
+
+Use this before and after changing models in `config.yaml`:
 
 ```bash
 uv run prr eval
 ```
 
-Run tests and lint:
-
-```bash
-uv run --extra test pytest
-uv run ruff check core frontends tests
-```
-
-If the sandbox or environment blocks the default uv cache, use a local cache:
-
-```bash
-uv --cache-dir .uv-cache run --extra test pytest
-uv --cache-dir .uv-cache run ruff check core frontends tests
-```
-
 ## Configuration
 
-`prr` reads `config.yaml` from the current working directory unless a command
-accepts and receives `--config`.
+`prr` reads `config.yaml` from the current working directory. Pass `--config` to
+override:
 
 ```yaml
 model: qwen2.5-coder:14b
@@ -90,20 +119,38 @@ ignore_paths:
   - __pycache__/**
 ```
 
-Ollama host resolution order:
+| Setting | Purpose |
+|---------|---------|
+| `model` | Ollama model name |
+| `ollama_host` | Ollama server URL (see below) |
+| `severity_threshold` | Drop findings below this severity |
+| `min_confidence` | Drop LLM findings below this confidence |
+| `max_comments_per_file` | Cap findings per file after filtering |
+| `max_comments_per_pr` | Cap inline comments posted per PR review |
+| `ignore_paths` | Glob patterns skipped by `prr scan` |
 
-1. `config.yaml` `ollama_host`
-2. `OLLAMA_HOST`
-3. Ollama client default, usually `http://localhost:11434`
+**Ollama host resolution** (first match wins):
 
-For WSL2, set `ollama_host` when Ollama runs on the Windows host or on a remote
-GPU machine.
+1. `config.yaml` → `ollama_host`
+2. `OLLAMA_HOST` environment variable
+3. Ollama client default (`http://localhost:11434`)
 
-## Architecture
+On WSL2, set `ollama_host` when Ollama runs on the Windows host or a remote GPU
+machine.
 
-The durable contract is `core.schema.Finding`. Model output, static-tool output,
-filtering, CLI rendering, and future GitHub output should all preserve this
-schema.
+## How it works
+
+```text
+input files
+  → tree-sitter chunks (functions, methods, classes, module-level code)
+  → ruff / mypy / bandit
+  → context + prior static findings attached per chunk
+  → Ollama review backend
+  → Finding validation and filtering
+  → CLI or GitHub output
+```
+
+Every producer and consumer speaks one schema — `core.schema.Finding`:
 
 ```python
 class Finding(BaseModel):
@@ -118,127 +165,97 @@ class Finding(BaseModel):
     confidence: float = 1.0
 ```
 
-Review pipeline:
-
-```text
-input files
-  -> tree-sitter chunks
-  -> ruff / mypy / bandit
-  -> context builder
-  -> Ollama review backend
-  -> Finding validation and filtering
-  -> CLI output
-```
-
-Core modules:
-
-- `core/schema.py`: shared `Finding` schema
-- `core/ingest.py`: Python chunking with tree-sitter
-- `core/detect_static.py`: `ruff`, `mypy`, and `bandit` adapters
-- `core/context.py`: context and static-finding attachment
-- `core/model.py`: Ollama model seam and structured output parsing
-- `core/filter.py`: line validation, deduplication, thresholds, sorting, caps,
-  diff-line restriction in PR mode
-- `core/diff.py`: GitHub patch parsing into added/commentable line sets
-- `core/github_out.py`: GitHub REST client and review payload builders
-- `core/eval.py`: seeded regression eval runner for model swaps
-- `frontends/cli.py`: `review` (file or `--pr`), `scan`, and `eval` commands
-
-## Output Rules
-
-Model output must be a JSON object:
-
-```json
-{"findings": []}
-```
-
-Invalid model output fails closed:
+**Model output** must be a JSON object: `{"findings": [...]}`. Invalid output
+fails closed:
 
 - unparseable JSON is dropped after one retry
 - invalid findings are dropped
-- findings whose snippets cannot be anchored to the source line are dropped
-- findings outside the target file's line range are dropped by the filter
+- findings whose `snippet` cannot be anchored to the source line are dropped
+- findings outside the file's line range are dropped by the filter
 
-Static tool findings and LLM findings are merged when they land on the same
-line. Static tools keep the located fact; LLM output can provide explanation or
-replacement suggestions.
+When static tools and the LLM flag the same line, static tools keep the located
+fact; the LLM can add explanation or a replacement `suggestion`.
 
-## GitHub PR Review
+Severity maps to cat moods in the CLI and on GitHub: error → 😾, warning → 🙀,
+info → 😸.
 
-`prr review --pr owner/repo#n` fetches the PR's changed Python files at the
-head commit, reviews only chunks that overlap added lines, and posts **one**
-batched review:
+## GitHub PR review details
 
-- inline comments on the RIGHT side of the diff, prefixed with the cat mood
-  for the finding's severity
-- `suggestion` fields rendered as one-click ```suggestion blocks
-- a summary body with the cat verdict and counts by severity
-- findings outside added lines are dropped
-- patchless/skipped Python files are noted in the summary
-- PR static analysis is file-scoped; `mypy` is skipped until full-checkout
-  review is added
-- at most `max_comments_per_pr` comments per review; the rest are noted in
-  the summary
+`prr review --pr owner/repo#n`:
 
-Authentication uses a PAT from the `GITHUB_TOKEN` environment variable.
+- posts inline comments on the **RIGHT** (new) side of the diff
+- renders `suggestion` fields as one-click GitHub `suggestion` blocks
+- includes a summary with severity counts and a cat verdict
+- drops findings outside added lines
+- notes patchless or skipped Python files in the summary
+- runs file-scoped static analysis only (`ruff` and `bandit`; `mypy` is skipped
+  until full-checkout review is supported)
+- caps comments at `max_comments_per_pr`; overflow is noted in the summary
+
 Use `--dry-run` to inspect the review without posting.
 
-## GitHub Actions Automation
+## GitHub Actions automation
 
-`.github/workflows/review.yml` runs prr on `pull_request` opened, synchronize,
-and reopened events using a self-hosted runner labeled `self-hosted` and `gpu`.
-Install that runner on the machine that can reach Ollama, ideally as a service
-so it survives reboots.
+`.github/workflows/review.yml` runs `prr` on `pull_request` opened, synchronize,
+and reopened events. It targets a **self-hosted** runner labeled `self-hosted`
+and `gpu` — install that runner on a machine that can reach Ollama.
 
-The workflow checks out the trusted base commit before running prr, then reviews
-the exact PR head SHA from the event payload. It uses the repository-scoped
-Actions `GITHUB_TOKEN` to post reviews, not a personal token. It intentionally
-keeps the Actions check green when prr finds code issues; the check fails only
-for runtime failures such as missing configuration, GitHub API errors, model
-backend failures, or failed review posting.
+The workflow:
 
-Use trusted/private repositories only. A self-hosted runner executes repository
-code on your machine. The bundled workflow only runs for same-repository PRs and
-skips fork PRs by default.
+- checks out the trusted **base** commit, then reviews the PR **head** SHA from
+  the event payload
+- uses the repository-scoped Actions `GITHUB_TOKEN` to post reviews
+- stays **green** when `prr` finds code issues; it fails only on runtime errors
+  (config, GitHub API, model backend, or review posting failures)
+- runs only for same-repository PRs (fork PRs are skipped)
 
-## Seeded Eval And Model Swaps
+**Security note:** a self-hosted runner executes repository code on your machine.
+Use trusted or private repositories, and treat the runner host as part of your
+trust boundary.
 
-`prr eval` runs the normal review pipeline over small synthetic cases stored as
-package fixtures. The source files are stored as `.py.txt`, then materialized in
-a temporary workspace, so `prr scan .` does not review intentionally-buggy eval
-fixtures.
+## Eval and model swaps
 
-The eval reports caught expected issues, missed expected issues, and false
-positives. To stay robust against incidental static-analysis noise — for example
-bandit's low-severity `B404` finding on any `import subprocess` — only `warning`-
-and `error`-severity findings outside the expected set count as false positives;
-`info`-severity findings are treated as tolerated noise and never fail a case.
+`prr eval` runs the normal pipeline over small synthetic cases stored as package
+fixtures (`.py.txt` files materialized in a temp workspace, so `prr scan .` never
+reviews them).
 
-Exit codes:
+The eval reports caught, missed, and false-positive findings. Only `warning`- and
+`error`-severity findings outside the expected set count as false positives;
+`info`-severity noise is tolerated.
 
-- `0`: eval completed with no misses or false positives
-- `1`: eval completed but found a regression
-- `2`: config, case loading, model, or runtime failure
+**Eval exit codes:**
 
-Model swap procedure:
+| Code | Meaning |
+|------|---------|
+| `0` | No misses or false positives |
+| `1` | Regression detected |
+| `2` | Config, case loading, model, or runtime failure |
+
+**Model swap procedure:**
 
 1. Change `model:` in `config.yaml`.
 2. Run `uv run prr eval`.
-3. Keep the new model only if the eval improves or holds steady.
+3. Keep the new model only if eval results improve or hold steady.
 
-## Development Roadmap
+## Development
 
-- Week 1: core schema, chunking, Ollama model seam, single-file review
-- Week 2: deterministic static pass, context attachment, filtering, scan command
-- Week 3: PR diff ingestion and GitHub review output
-- Week 4: self-hosted runner automation
-- Week 5: polish, evaluation, and model-swap handoff
+```bash
+uv run --extra test pytest
+uv run ruff check core frontends tests
+```
 
-## Notes
+If the environment blocks the default uv cache:
 
-- Keep line numbers 1-based and absolute within the reviewed file.
-- Use `pathlib` and UTF-8 file I/O.
-- Use subprocess arg lists, not `shell=True`.
-- Do not require live Ollama in automated tests.
-- Keep the model backend swappable; callers should depend on the model seam, not
-  on Ollama directly.
+```bash
+uv --cache-dir .uv-cache run --extra test pytest
+uv --cache-dir .uv-cache run ruff check core frontends tests
+```
+
+Tests use fake model backends — live Ollama is not required in CI. See
+[`AGENTS.md`](AGENTS.md) for contributor conventions.
+
+CI runs on `ubuntu-latest` and `macos-latest` for every push and pull request.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
