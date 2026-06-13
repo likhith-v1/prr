@@ -354,7 +354,7 @@ class CliTests(unittest.TestCase):
                     ],
                     contents={"pkg/sample.py": _PR_CONTENT},
                 )
-                self.heads = ["abc123", "new456"]
+                self.heads = ["abc123", "abc123", "new456"]
 
             def get_pr(self, owner: str, repo: str, number: int) -> dict[str, object]:
                 return {"head": {"sha": self.heads.pop(0)}}
@@ -391,6 +391,58 @@ class CliTests(unittest.TestCase):
                     dry_run=False,
                     config=None,
                     pr_head_sha="abc123",
+                )
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(client.posted, [])
+        self.assertIn("Skipping review", output.getvalue())
+
+    def test_pr_review_skips_post_when_head_moves_during_local_review(self) -> None:
+        class MovingHeadClient(FakeGithubClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    files=[
+                        {"filename": "pkg/sample.py", "status": "modified", "patch": _PR_PATCH}
+                    ],
+                    contents={"pkg/sample.py": _PR_CONTENT},
+                )
+                self.heads = ["abc123", "abc123", "new456"]
+
+            def get_pr(self, owner: str, repo: str, number: int) -> dict[str, object]:
+                return {"head": {"sha": self.heads.pop(0)}}
+
+        client = MovingHeadClient()
+        output = io.StringIO()
+
+        def fake_review(**kwargs: object) -> list[Finding]:
+            return [
+                Finding(
+                    path=str(kwargs["path"]),
+                    line=2,
+                    severity="error",
+                    category="security",
+                    comment="eval of untrusted input.",
+                    source="llm",
+                    confidence=0.95,
+                )
+            ]
+
+        with (
+            patch("frontends.cli.run_static_tools", return_value=[]),
+            patch("frontends.cli.review", side_effect=fake_review),
+            patch("frontends.cli._github_client", return_value=client),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_review(
+                argparse.Namespace(
+                    file=None,
+                    pr="octo/prr#7",
+                    dry_run=False,
+                    config=None,
                 )
             )
 

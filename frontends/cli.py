@@ -426,14 +426,29 @@ def _expected_pr_head_sha(args: argparse.Namespace) -> str | None:
     return value or None
 
 
-def _head_changed(expected_sha: str | None, current_sha: str, pr_ref: str) -> bool:
-    if expected_sha is None or current_sha == expected_sha:
+def _head_changed(baseline_sha: str, current_sha: str, pr_ref: str) -> bool:
+    if current_sha == baseline_sha:
         return False
     console.print(
         "[yellow]Skipping review:[/yellow] "
-        f"{pr_ref} moved from {expected_sha} to {current_sha}."
+        f"{pr_ref} moved from {baseline_sha} to {current_sha}."
     )
     return True
+
+
+def _refresh_pr_head_sha(
+    client: GithubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    baseline_sha: str,
+    pr_ref: str,
+) -> str | None:
+    """Return the current PR head SHA when it still matches baseline_sha."""
+    current_sha = _pr_head_sha(client.get_pr(owner, repo, number))
+    if _head_changed(baseline_sha, current_sha, pr_ref):
+        return None
+    return current_sha
 
 
 def _pr_review_targets(
@@ -516,7 +531,7 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
 
     try:
         head_sha = _pr_head_sha(client.get_pr(owner, repo, number))
-        if _head_changed(expected_head_sha, head_sha, pr_ref):
+        if expected_head_sha is not None and _head_changed(expected_head_sha, head_sha, pr_ref):
             return 0
         pr_files = client.list_pr_files(owner, repo, number)
     except (GithubError, KeyError, TypeError) as exc:
@@ -532,17 +547,18 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
             console.print(f"[dim]Skipped {item.path}: {item.reason}.[/dim]")
         if skipped and not args.dry_run:
             try:
-                if expected_head_sha is not None:
-                    latest_head_sha = _pr_head_sha(client.get_pr(owner, repo, number))
-                    if _head_changed(expected_head_sha, latest_head_sha, pr_ref):
-                        return 0
+                post_head_sha = _refresh_pr_head_sha(
+                    client, owner, repo, number, head_sha, pr_ref
+                )
+                if post_head_sha is None:
+                    return 0
                 result = client.post_review(
                     owner,
                     repo,
                     number,
                     build_summary([], notes=notes),
                     [],
-                    commit_id=head_sha,
+                    commit_id=post_head_sha,
                 )
             except GithubError as exc:
                 console.print("[red]Could not post review to GitHub.[/red]")
@@ -558,12 +574,27 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
             console.print("[dim]Dry run — review not posted.[/dim]")
         return 0
 
+    review_head_sha = head_sha
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp)
         local_files: list[Path] = []
+        try:
+            refreshed = _refresh_pr_head_sha(
+                client, owner, repo, number, head_sha, pr_ref
+            )
+            if refreshed is None:
+                return 0
+            review_head_sha = refreshed
+        except (GithubError, KeyError, TypeError) as exc:
+            console.print("[red]Could not refresh PR head from GitHub.[/red]")
+            console.print(f"[dim]{exc}[/dim]")
+            return 2
+
         for target in targets:
             try:
-                content = client.get_file_content(owner, repo, target.path, head_sha)
+                content = client.get_file_content(
+                    owner, repo, target.path, review_head_sha
+                )
             except GithubError as exc:
                 console.print(f"[red]Could not fetch file from GitHub:[/red] {target.path}")
                 console.print(f"[dim]{exc}[/dim]")
@@ -622,17 +653,18 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
         return _pr_exit_code(has_errors, args)
 
     try:
-        if expected_head_sha is not None:
-            latest_head_sha = _pr_head_sha(client.get_pr(owner, repo, number))
-            if _head_changed(expected_head_sha, latest_head_sha, pr_ref):
-                return 0
+        post_head_sha = _refresh_pr_head_sha(
+            client, owner, repo, number, review_head_sha, pr_ref
+        )
+        if post_head_sha is None:
+            return 0
         result = client.post_review(
             owner,
             repo,
             number,
             summary,
             comments,
-            commit_id=head_sha,
+            commit_id=post_head_sha,
         )
     except GithubError as exc:
         console.print("[red]Could not post review to GitHub.[/red]")
