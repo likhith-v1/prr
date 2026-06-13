@@ -121,12 +121,11 @@ def _restrict_to_allowed_lines(
     finding: Finding,
     allowed_lines: Mapping[str, set[int]],
 ) -> Finding | None:
-    """Keep only findings GitHub will accept as diff comments.
+    """Keep only findings that are allowed to be emitted in PR mode.
 
-    The finding's display path must have an entry and its primary line must be
-    commentable.  A range whose tail leaves the diff falls back to a
-    single-line anchor and drops any suggestion so GitHub cannot apply a
-    multi-line replacement to one line.
+    In this repo we currently restrict PR comments to *added* lines (not unchanged
+    context lines). If a range extends beyond the allowed set, fall back to a
+    single-line anchor and drop any suggestion.
     """
     allowed = allowed_lines.get(finding.path)
     if allowed is None or finding.line not in allowed:
