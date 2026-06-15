@@ -83,9 +83,10 @@ uv run prr review --pr owner/repo#123             # post the review
 
 With [GitHub CLI](https://cli.github.com/) authenticated, you can populate `GITHUB_TOKEN` from it:
 
-    gh auth login
-    export GITHUB_TOKEN="$(gh auth token)"
-    uv run prr review --pr owner/repo#123
+```bash
+gh auth login
+export GITHUB_TOKEN="$(gh auth token)"
+uv run prr review --pr owner/repo#123
 ```
 
 ### Run the seeded eval
@@ -135,6 +136,52 @@ ignore_paths:
 
 On WSL2, set `ollama_host` when Ollama runs on the Windows host or a remote GPU
 machine.
+
+### WSL2 and Ollama on Windows
+
+On WSL2 2.3+, `http://127.0.0.1:11434` usually works without any extra
+configuration — recent WSL2 forwards localhost automatically to the Windows host.
+Verify before running `prr`:
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+If that fails, find the Windows host IP and set `ollama_host` (see the
+[`ollama_host` config row](#configuration) above):
+
+```bash
+# Most reliable on WSL2: read the nameserver entry
+grep nameserver /etc/resolv.conf | awk '{print $2}'
+```
+
+```yaml
+# config.yaml
+ollama_host: http://192.168.x.x:11434
+```
+
+Or set it as an environment variable instead:
+
+```bash
+export OLLAMA_HOST=http://192.168.x.x:11434
+```
+
+**Windows side checklist:**
+
+- Ollama is running (tray icon or `ollama serve`).
+- "Expose Ollama to the network" is enabled in Ollama settings.
+- Windows Firewall allows inbound TCP **11434** on the Private profile.
+- The model is pulled: `ollama pull qwen2.5-coder:14b`.
+
+**Optional — mirrored networking** (makes localhost more reliable across WSL
+restarts). In `%UserProfile%\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Then restart WSL: `wsl --shutdown`, reopen the terminal.
 
 ## How it works
 
