@@ -24,6 +24,7 @@ dependencies = [
 test = [
     "pytest>=8.0",
 ]
+vllm = ["openai>=1.0"]
 
 [project.scripts]
 prr = "frontends.cli:main"

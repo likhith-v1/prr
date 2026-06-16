@@ -33,6 +33,8 @@ class PrrConfig(BaseModel):
 
     model: str = DEFAULT_MODEL
     ollama_host: str | None = None
+    backend: Literal["ollama", "vllm"] = "ollama"
+    vllm_base_url: str | None = None
     severity_threshold: Literal["info", "warning", "error"] = "info"
     min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     max_comments_per_file: int = Field(default=20, ge=1)

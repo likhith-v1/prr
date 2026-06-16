@@ -246,6 +246,8 @@ def _run_case(
                     findings=prior,
                     model=config.model,
                     ollama_host=config.ollama_host,
+                    backend_type=config.backend,
+                    vllm_base_url=config.vllm_base_url,
                 )
             )
         except ModelBackendError as exc:

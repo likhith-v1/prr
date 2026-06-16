@@ -119,8 +119,10 @@ ignore_paths:
 
 | Setting | Purpose |
 |---------|---------|
-| `model` | Ollama model name |
+| `model` | Model name (Ollama tag or vLLM model ID) |
 | `ollama_host` | Ollama server URL (see below) |
+| `backend` | `ollama` (default) or `vllm` |
+| `vllm_base_url` | vLLM server URL, e.g. `http://localhost:8000/v1` |
 | `severity_threshold` | Drop findings below this severity |
 | `min_confidence` | Drop LLM findings below this confidence |
 | `max_comments_per_file` | Cap findings per file after filtering |
@@ -135,6 +137,23 @@ ignore_paths:
 
 On WSL2, set `ollama_host` when Ollama runs on the Windows host or a remote GPU
 machine.
+
+### vLLM backend
+
+Point `prr` at a running [vLLM](https://docs.vllm.ai/) server instead of Ollama:
+
+```yaml
+backend: vllm
+model: Qwen/Qwen2.5-Coder-14B-Instruct
+vllm_base_url: http://localhost:8000/v1
+```
+
+Start the server: `vllm serve Qwen/Qwen2.5-Coder-14B-Instruct`
+
+Install the required client library: `uv sync --extra vllm`
+
+The API key defaults to `EMPTY` (vLLM ignores it). Set `OPENAI_API_KEY` to
+override for deployments that require a key.
 
 ## How it works
 
