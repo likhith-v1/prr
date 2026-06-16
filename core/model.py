@@ -95,7 +95,10 @@ class VllmBackend:
                     "openai package is required for VllmBackend. "
                     "Install it with: uv sync --extra vllm"
                 ) from exc
-            resolved_key = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
+            resolved_key = (
+                api_key if api_key is not None
+                else os.environ.get("OPENAI_API_KEY", "EMPTY")
+            )
             self._client = OpenAI(base_url=base_url, api_key=resolved_key)
 
     def generate(self, system: str, user: str) -> str:
@@ -110,14 +113,18 @@ class VllmBackend:
             kwargs["extra_body"] = {"guided_json": self.format_schema}
         try:
             response = self._client.chat.completions.create(**kwargs)
+            if not response.choices:
+                raise ModelBackendError("vLLM returned no completion choices")
+            content = response.choices[0].message.content
+            if content is None:
+                raise ModelBackendError("vLLM returned an empty response")
+            return content
+        except ModelBackendError:
+            raise
         except (ConnectionError, Exception) as exc:
             # Catch openai.APIError / openai.APIConnectionError without requiring
             # the openai package to be installed in the test environment.
             raise ModelBackendError(str(exc)) from exc
-        content = response.choices[0].message.content
-        if content is None:
-            raise ModelBackendError("vLLM returned an empty response")
-        return content
 
 
 # ── transient boundary models (not Finding — snippet is dropped after relocation) ──

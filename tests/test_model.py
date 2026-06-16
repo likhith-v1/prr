@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import ollama
 
@@ -131,6 +133,18 @@ def _make_failing_openai_client(exc: Exception) -> Any:
     return SimpleNamespace(chat=chat)
 
 
+def _make_empty_choices_openai_client() -> Any:
+    """Stub that returns a completion with no choices."""
+    completion = SimpleNamespace(choices=[])
+
+    def create(**kwargs: Any) -> Any:
+        return completion
+
+    completions = SimpleNamespace(create=create)
+    chat = SimpleNamespace(completions=completions)
+    return SimpleNamespace(chat=chat)
+
+
 class VllmBackendTests(unittest.TestCase):
     def test_generate_passes_guided_json_when_schema_set(self) -> None:
         schema = {"type": "object", "properties": {"findings": {}}}
@@ -190,6 +204,61 @@ class VllmBackendTests(unittest.TestCase):
 
         with self.assertRaises(ModelBackendError):
             backend.generate("sys", "user")
+
+    def test_generate_raises_model_backend_error_on_empty_choices(self) -> None:
+        from core.model import ModelBackendError
+
+        fake = _make_empty_choices_openai_client()
+        backend = VllmBackend(
+            model="m",
+            base_url="http://localhost:8000/v1",
+            client=fake,
+        )
+
+        with self.assertRaises(ModelBackendError) as ctx:
+            backend.generate("sys", "user")
+
+        self.assertIn("no completion choices", str(ctx.exception))
+
+    def test_init_uses_explicit_empty_api_key(self) -> None:
+        mock_openai = MagicMock()
+        mock_client_ctor = MagicMock()
+        mock_openai.OpenAI = mock_client_ctor
+
+        with (
+            patch.dict("sys.modules", {"openai": mock_openai}),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}, clear=False),
+        ):
+            VllmBackend(
+                model="m",
+                base_url="http://localhost:8000/v1",
+                api_key="",
+            )
+
+        mock_client_ctor.assert_called_once_with(
+            base_url="http://localhost:8000/v1",
+            api_key="",
+        )
+
+    def test_init_falls_back_to_env_when_api_key_is_none(self) -> None:
+        mock_openai = MagicMock()
+        mock_client_ctor = MagicMock()
+        mock_openai.OpenAI = mock_client_ctor
+
+        with (
+            patch.dict("sys.modules", {"openai": mock_openai}),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}, clear=False),
+        ):
+            VllmBackend(
+                model="m",
+                base_url="http://localhost:8000/v1",
+                api_key=None,
+            )
+
+        mock_client_ctor.assert_called_once_with(
+            base_url="http://localhost:8000/v1",
+            api_key="from-env",
+        )
 
     def test_make_backend_returns_vllm_backend(self) -> None:
         # _make_backend constructs VllmBackend which needs openai unless a client
