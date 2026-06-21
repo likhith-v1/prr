@@ -261,17 +261,27 @@ class VllmBackendTests(unittest.TestCase):
         )
 
     def test_make_backend_returns_vllm_backend(self) -> None:
-        # _make_backend constructs VllmBackend which needs openai unless a client
-        # is injected; verify the type by inspecting _make_backend's branch logic
-        # via the class directly with a pre-injected client.
-        fake = _make_fake_openai_client()
-        backend = VllmBackend(
-            model="m",
-            base_url="http://localhost:8000/v1",
-            client=fake,
-        )
-        self.assertIsInstance(backend, VllmBackend)
+        mock_openai = MagicMock()
+        mock_client_ctor = MagicMock(return_value=_make_fake_openai_client())
+        mock_openai.OpenAI = mock_client_ctor
 
+        with (
+            patch.dict("sys.modules", {"openai": mock_openai}),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}, clear=True),
+        ):
+            backend = _make_backend(
+                model="m",
+                backend_type="vllm",
+                ollama_host=None,
+                vllm_base_url="http://localhost:8000/v1",
+                format_schema=None,
+            )
+
+        self.assertIsInstance(backend, VllmBackend)
+        mock_client_ctor.assert_called_once_with(
+            base_url="http://localhost:8000/v1",
+            api_key="from-env",
+        )
     def test_make_backend_returns_ollama_backend(self) -> None:
         backend = _make_backend(
             model="m",
