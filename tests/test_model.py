@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import ollama
 
-from core.model import OllamaBackend, _parse_findings, review
+from core.model import (
+    OllamaBackend,
+    VllmBackend,
+    _make_backend,
+    _parse_findings,
+    review,
+)
 
 
 def response(*findings: dict[str, object]) -> str:
@@ -91,6 +101,208 @@ class OllamaBackendHostTests(unittest.TestCase):
         # host=None defers to the module-level client, which honors OLLAMA_HOST.
         backend = OllamaBackend(model="m")
         self.assertIs(backend._client, ollama)
+
+
+# ── VllmBackend tests (no live server; fake client injected) ──────────────────
+
+def _make_fake_openai_client(content: str = "{}") -> Any:
+    """Build a minimal stub that mimics openai.OpenAI().chat.completions.create()."""
+    message = SimpleNamespace(content=content)
+    choice = SimpleNamespace(message=message)
+    completion = SimpleNamespace(choices=[choice])
+
+    calls: list[dict[str, Any]] = []
+
+    def create(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return completion
+
+    completions = SimpleNamespace(create=create, _calls=calls)
+    chat = SimpleNamespace(completions=completions)
+    client = SimpleNamespace(chat=chat)
+    return client
+
+
+def _make_failing_openai_client(exc: Exception) -> Any:
+    """Stub whose create() always raises exc."""
+    def create(**kwargs: Any) -> Any:
+        raise exc
+
+    completions = SimpleNamespace(create=create)
+    chat = SimpleNamespace(completions=completions)
+    return SimpleNamespace(chat=chat)
+
+
+def _make_empty_choices_openai_client() -> Any:
+    """Stub that returns a completion with no choices."""
+    completion = SimpleNamespace(choices=[])
+
+    def create(**kwargs: Any) -> Any:
+        return completion
+
+    completions = SimpleNamespace(create=create)
+    chat = SimpleNamespace(completions=completions)
+    return SimpleNamespace(chat=chat)
+
+
+class VllmBackendTests(unittest.TestCase):
+    def test_generate_passes_guided_json_when_schema_set(self) -> None:
+        schema = {"type": "object", "properties": {"findings": {}}}
+        fake = _make_fake_openai_client('{"findings": []}')
+        backend = VllmBackend(
+            model="m",
+            base_url="http://localhost:8000/v1",
+            format_schema=schema,
+            client=fake,
+        )
+
+        result = backend.generate("sys", "user")
+
+        calls = fake.chat.completions._calls
+        self.assertEqual(len(calls), 1)
+        self.assertIn("extra_body", calls[0])
+        self.assertEqual(calls[0]["extra_body"], {"guided_json": schema})
+        self.assertEqual(result, '{"findings": []}')
+
+    def test_generate_omits_extra_body_without_schema(self) -> None:
+        fake = _make_fake_openai_client("{}")
+        backend = VllmBackend(
+            model="m",
+            base_url="http://localhost:8000/v1",
+            format_schema=None,
+            client=fake,
+        )
+
+        backend.generate("sys", "user")
+
+        calls = fake.chat.completions._calls
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("extra_body", calls[0])
+
+    def test_generate_raises_model_backend_error_on_connection_failure(self) -> None:
+        from core.model import ModelBackendError
+
+        fake = _make_failing_openai_client(ConnectionError("refused"))
+        backend = VllmBackend(
+            model="m",
+            base_url="http://localhost:8000/v1",
+            client=fake,
+        )
+
+        with self.assertRaises(ModelBackendError):
+            backend.generate("sys", "user")
+
+    def test_generate_raises_model_backend_error_on_api_error(self) -> None:
+        from core.model import ModelBackendError
+
+        fake = _make_failing_openai_client(RuntimeError("API 500"))
+        backend = VllmBackend(
+            model="m",
+            base_url="http://localhost:8000/v1",
+            client=fake,
+        )
+
+        with self.assertRaises(ModelBackendError):
+            backend.generate("sys", "user")
+
+    def test_generate_raises_model_backend_error_on_empty_choices(self) -> None:
+        from core.model import ModelBackendError
+
+        fake = _make_empty_choices_openai_client()
+        backend = VllmBackend(
+            model="m",
+            base_url="http://localhost:8000/v1",
+            client=fake,
+        )
+
+        with self.assertRaises(ModelBackendError) as ctx:
+            backend.generate("sys", "user")
+
+        self.assertIn("no completion choices", str(ctx.exception))
+
+    def test_init_uses_explicit_empty_api_key(self) -> None:
+        mock_openai = MagicMock()
+        mock_client_ctor = MagicMock()
+        mock_openai.OpenAI = mock_client_ctor
+
+        with (
+            patch.dict("sys.modules", {"openai": mock_openai}),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}, clear=False),
+        ):
+            VllmBackend(
+                model="m",
+                base_url="http://localhost:8000/v1",
+                api_key="",
+            )
+
+        mock_client_ctor.assert_called_once_with(
+            base_url="http://localhost:8000/v1",
+            api_key="",
+        )
+
+    def test_init_falls_back_to_env_when_api_key_is_none(self) -> None:
+        mock_openai = MagicMock()
+        mock_client_ctor = MagicMock()
+        mock_openai.OpenAI = mock_client_ctor
+
+        with (
+            patch.dict("sys.modules", {"openai": mock_openai}),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}, clear=False),
+        ):
+            VllmBackend(
+                model="m",
+                base_url="http://localhost:8000/v1",
+                api_key=None,
+            )
+
+        mock_client_ctor.assert_called_once_with(
+            base_url="http://localhost:8000/v1",
+            api_key="from-env",
+        )
+
+    def test_make_backend_returns_vllm_backend(self) -> None:
+        mock_openai = MagicMock()
+        mock_client_ctor = MagicMock(return_value=_make_fake_openai_client())
+        mock_openai.OpenAI = mock_client_ctor
+
+        with (
+            patch.dict("sys.modules", {"openai": mock_openai}),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}, clear=True),
+        ):
+            backend = _make_backend(
+                model="m",
+                backend_type="vllm",
+                ollama_host=None,
+                vllm_base_url="http://localhost:8000/v1",
+                format_schema=None,
+            )
+
+        self.assertIsInstance(backend, VllmBackend)
+        mock_client_ctor.assert_called_once_with(
+            base_url="http://localhost:8000/v1",
+            api_key="from-env",
+        )
+    def test_make_backend_returns_ollama_backend(self) -> None:
+        backend = _make_backend(
+            model="m",
+            backend_type="ollama",
+            ollama_host=None,
+            vllm_base_url=None,
+            format_schema=None,
+        )
+        self.assertIsInstance(backend, OllamaBackend)
+
+    def test_make_backend_vllm_requires_base_url(self) -> None:
+        from core.model import ModelBackendError
+
+        with self.assertRaises(ModelBackendError):
+            _make_backend(
+                model="m",
+                backend_type="vllm",
+                ollama_host=None,
+                vllm_base_url=None,
+                format_schema=None,
+            )
 
 
 if __name__ == "__main__":
