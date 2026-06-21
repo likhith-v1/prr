@@ -13,7 +13,7 @@ from core.schema import Finding
 
 
 _SEVERITY_ORDER = {"info": 0, "warning": 1, "error": 2}
-_SOURCE_ORDER = {"ruff": 0, "mypy": 1, "bandit": 2, "llm": 3}
+_SOURCE_ORDER = {"ruff": 0, "mypy": 1, "bandit": 2, "eslint": 3, "llm": 4}
 
 
 def _resolve_path(path: str, root: Path) -> Path:

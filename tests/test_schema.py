@@ -49,6 +49,10 @@ class FindingSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             make_finding(comment="")
 
+    def test_eslint_source_is_valid(self) -> None:
+        finding = make_finding(source="eslint")
+        self.assertEqual(finding.source, "eslint")
+
 
 if __name__ == "__main__":
     unittest.main()

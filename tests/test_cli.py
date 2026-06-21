@@ -237,6 +237,50 @@ class CliTests(unittest.TestCase):
         self.assertEqual(review_calls, [str(included)])
         self.assertIn("prr is purring", output.getvalue())
 
+    def test_scan_includes_ts_files_when_eslint_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            py_path = root / "sample.py"
+            ts_path = root / "sample.ts"
+            py_path.write_text("x = 1\n", encoding="utf-8")
+            ts_path.write_text("const unused = 1;\n", encoding="utf-8")
+            static = Finding(
+                path="sample.ts",
+                line=1,
+                severity="error",
+                category="bug",
+                comment="no-unused-vars: 'unused' is defined but never used.",
+                source="eslint",
+            )
+            output = io.StringIO()
+            static_calls: list[list[Path]] = []
+            review_calls: list[str] = []
+
+            def fake_static(paths: list[Path], root: Path) -> list[Finding]:
+                static_calls.append(paths)
+                return [static] if any(path.suffix == ".ts" for path in paths) else []
+
+            def fake_review(**kwargs: object) -> list[Finding]:
+                review_calls.append(str(kwargs["path"]))
+                return []
+
+            with (
+                patch("frontends.cli.is_eslint_available", return_value=True),
+                patch("frontends.cli._run_static_tools", side_effect=fake_static),
+                patch("frontends.cli.review", side_effect=fake_review),
+                patch(
+                    "frontends.cli.console",
+                    Console(file=output, force_terminal=False, color_system=None),
+                ),
+            ):
+                result = cmd_scan(argparse.Namespace(path=str(root), config=None))
+
+        self.assertEqual(result, 1)
+        self.assertEqual(static_calls, [[py_path, ts_path]])
+        self.assertEqual(review_calls, [str(py_path)])
+        self.assertIn("sample.ts", output.getvalue())
+        self.assertIn("no-unused-vars", output.getvalue())
+
     def test_review_rejects_file_and_pr_together(self) -> None:
         output = io.StringIO()
 

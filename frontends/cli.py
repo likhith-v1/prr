@@ -23,7 +23,7 @@ from rich.text import Text
 
 from core.config import ConfigError, PrrConfig, load_config
 from core.context import build_context, findings_for_chunk
-from core.detect_static import ToolName, run_static_tools
+from core.detect_static import ToolName, is_eslint_available, run_static_tools
 from core.diff import PatchInfo, parse_patch
 from core.eval import EvalError, EvalModelError, EvalReport, run_eval
 from core.filter import filter_findings
@@ -91,15 +91,31 @@ def _load_config_for_args(args: argparse.Namespace) -> PrrConfig | None:
         return None
 
 
-def _validate_python_file(path: Path) -> bool:
+_JS_SUFFIXES = frozenset({".js", ".jsx", ".ts", ".tsx"})
+
+
+def _validate_reviewable_file(path: Path, *, allow_js: bool = False) -> bool:
     if not path.exists():
         console.print(f"[red]File not found:[/red] {path}")
         return False
     if not path.is_file():
         console.print(f"[red]Not a file:[/red] {path}")
         return False
-    if path.suffix != ".py":
-        console.print(f"[red]Not a Python file:[/red] {path}")
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        pass
+    elif suffix in _JS_SUFFIXES:
+        if not allow_js:
+            console.print(f"[red]Not a Python file:[/red] {path}")
+            return False
+        if not is_eslint_available():
+            console.print(
+                f"[red]eslint not found:[/red] cannot review {path} "
+                "(install eslint on PATH to scan TypeScript/JavaScript files)"
+            )
+            return False
+    else:
+        console.print(f"[red]Unsupported file type:[/red] {path}")
         return False
     try:
         path.read_text(encoding="utf-8")
@@ -208,7 +224,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         return 1
 
     path = Path(args.file)
-    if not _validate_python_file(path):
+    if not _validate_reviewable_file(path):
         return 1
 
     console.print(f"\n[bold]prr[/bold] reviewing [cyan]{path}[/cyan] …\n")
@@ -246,12 +262,13 @@ def _is_ignored(path: Path, root: Path, config: PrrConfig) -> bool:
     return _matches_ignore(rel, config)
 
 
-def _collect_python_files(target: Path, config: PrrConfig) -> tuple[Path, list[Path]] | None:
+def _collect_reviewable_files(target: Path, config: PrrConfig) -> tuple[Path, list[Path]] | None:
+    eslint_ready = is_eslint_available()
     if not target.exists():
         console.print(f"[red]Path not found:[/red] {target}")
         return None
     if target.is_file():
-        if not _validate_python_file(target):
+        if not _validate_reviewable_file(target, allow_js=eslint_ready):
             return None
         return target.parent, [target]
     if not target.is_dir():
@@ -259,11 +276,19 @@ def _collect_python_files(target: Path, config: PrrConfig) -> tuple[Path, list[P
         return None
 
     root = target
-    files = [
-        path
-        for path in sorted(root.rglob("*.py"))
-        if path.is_file() and not _is_ignored(path, root, config)
-    ]
+    globs = ["*.py"]
+    if eslint_ready:
+        globs.extend(["*.ts", "*.tsx", "*.js", "*.jsx"])
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in globs:
+        for path in sorted(root.rglob(pattern)):
+            if not path.is_file() or path in seen:
+                continue
+            if _is_ignored(path, root, config):
+                continue
+            seen.add(path)
+            files.append(path)
     return root, files
 
 
@@ -294,12 +319,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     target = Path(args.path)
-    collected = _collect_python_files(target, config)
+    collected = _collect_reviewable_files(target, config)
     if collected is None:
         return 1
     root, files = collected
     if not files:
-        console.print(f"[dim]No Python files found under {target}.[/dim]")
+        if is_eslint_available():
+            console.print(f"[dim]No reviewable files found under {target}.[/dim]")
+        else:
+            console.print(
+                f"[dim]No Python files found under {target}. "
+                "Install eslint on PATH to include .ts/.js files.[/dim]"
+            )
         return 0
 
     console.print(f"\n[bold]prr[/bold] scanning [cyan]{target}[/cyan] …\n")
@@ -307,6 +338,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     llm_findings: list[Finding] = []
     for path in files:
+        if path.suffix != ".py":
+            continue
         console.print(f"[dim]file {path}[/dim]")
         found, ok, _ = _review_file(path, config, static_findings, root=root)
         if not ok:
@@ -726,8 +759,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("--config", help="Path to config.yaml")
 
     # prr scan <path>
-    p_scan = sub.add_parser("scan", help="Scan a Python file or directory")
-    p_scan.add_argument("path", help="Python file or directory to scan")
+    p_scan = sub.add_parser("scan", help="Scan Python and optional TS/JS files in a path")
+    p_scan.add_argument("path", help="File or directory to scan")
     p_scan.add_argument("--config", help="Path to config.yaml")
 
     # prr eval

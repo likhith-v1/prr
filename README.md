@@ -4,7 +4,8 @@ A local Python code-review CLI that pairs static analysis with an Ollama model.
 Review a file, scan a project, or post inline comments on a GitHub pull request —
 all from your machine, with no cloud API keys required for the review brain.
 
-`prr` runs **ruff**, **mypy**, and **bandit**, feeds their findings into an LLM
+`prr` runs **ruff**, **mypy**, and **bandit** on Python files, optionally **eslint** on
+TypeScript/JavaScript when eslint is installed, feeds their findings into an LLM
 chunk-by-chunk, validates everything against a shared schema, and renders
 cat-themed output in the terminal or on GitHub.
 
@@ -27,7 +28,9 @@ cat-themed output in the terminal or on GitHub.
 - [Ollama](https://ollama.com/) with the configured model pulled locally
 
 Static tools (`ruff`, `mypy`, `bandit`) are installed as Python dependencies and
-are available through `uv run`; you do not need separate system installs.
+are available through `uv run`; you do not need separate system installs. **eslint**
+is optional — install it on your PATH (for example `npm install -g eslint`) to
+include `.ts`, `.tsx`, `.js`, and `.jsx` files in `prr scan`.
 
 ## Quick start
 
@@ -66,6 +69,9 @@ uv run prr review path/to/file.py
 uv run prr scan .
 uv run prr scan src/
 ```
+
+When **eslint** is on PATH, scan also includes `.ts`, `.tsx`, `.js`, and `.jsx`
+files (static analysis only — the LLM pass remains Python-only).
 
 Ignored paths come from `config.yaml` (defaults include `.venv/`, `__pycache__/`,
 and other build/cache directories).
@@ -189,8 +195,8 @@ Then restart WSL: `wsl --shutdown`, reopen the terminal.
 
 ```text
 input files
-  → tree-sitter chunks (functions, methods, classes, module-level code)
-  → ruff / mypy / bandit
+  → tree-sitter chunks (Python: functions, methods, classes, module-level code)
+  → ruff / mypy / bandit (Python) and eslint (TS/JS when installed)
   → context + prior static findings attached per chunk
   → Ollama review backend
   → Finding validation and filtering
@@ -208,7 +214,7 @@ class Finding(BaseModel):
     category: Literal["bug", "security", "style", "perf", "test", "other"]
     comment: str
     suggestion: str | None = None
-    source: Literal["llm", "ruff", "mypy", "bandit"]
+    source: Literal["llm", "ruff", "mypy", "bandit", "eslint"]
     confidence: float = 1.0
 ```
 

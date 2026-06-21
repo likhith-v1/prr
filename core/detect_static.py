@@ -19,8 +19,9 @@ from core.schema import Finding
 logger = logging.getLogger(__name__)
 
 
-ToolName = Literal["ruff", "mypy", "bandit"]
+ToolName = Literal["ruff", "mypy", "bandit", "eslint"]
 _STATIC_TOOL_TIMEOUT_SECONDS = 60
+_JS_SUFFIXES = frozenset({".js", ".jsx", ".ts", ".tsx"})
 
 _MYPY_LINE = re.compile(
     r"^(?P<path>.*?):(?P<line>\d+)(?::(?P<column>\d+))?: "
@@ -46,6 +47,18 @@ def _relative_path(path: str, root: Path | None) -> str:
         return str(candidate.resolve().relative_to(root.resolve()))
     except (OSError, ValueError):
         return str(candidate)
+
+
+def _is_js_path(path: Path) -> bool:
+    return path.suffix.lower() in _JS_SUFFIXES
+
+
+def _is_python_path(path: Path) -> bool:
+    return path.suffix == ".py"
+
+
+def is_eslint_available() -> bool:
+    return _resolve_executable("eslint") is not None
 
 
 def _path_args(paths: Iterable[Path], root: Path) -> list[str]:
@@ -202,6 +215,77 @@ def parse_bandit_json(raw: str, root: Path | None = None) -> list[Finding]:
     return findings
 
 
+def _eslint_severity(level: int) -> Literal["info", "warning", "error"]:
+    if level >= 2:
+        return "error"
+    if level == 1:
+        return "warning"
+    return "info"
+
+
+def _eslint_category(rule_id: str | None) -> Literal["bug", "security", "style", "perf", "test", "other"]:
+    if not rule_id:
+        return "other"
+    lowered = rule_id.lower()
+    if lowered.startswith("security/") or "security" in lowered or "injection" in lowered:
+        return "security"
+    if lowered.startswith(("jest/", "vitest/", "testing-library/")):
+        return "test"
+    if "perf" in lowered:
+        return "perf"
+    if lowered.startswith(("no-undef", "no-unreachable", "@typescript-eslint/no-floating-promises")):
+        return "bug"
+    if lowered.startswith(("no-", "@typescript-eslint/no-")):
+        return "bug"
+    return "style"
+
+
+def parse_eslint_json(raw: str, root: Path | None = None) -> list[Finding]:
+    """Parse `eslint --format json` output."""
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        logger.debug("Could not parse eslint JSON: %s", exc)
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    findings: list[Finding] = []
+    for file_result in data:
+        if not isinstance(file_result, dict):
+            continue
+        messages = file_result.get("messages")
+        if not isinstance(messages, list):
+            continue
+        file_path = str(file_result.get("filePath") or "")
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            line = message.get("line")
+            if not isinstance(line, int):
+                continue
+            end_line = message.get("endLine")
+            if not isinstance(end_line, int) or end_line <= line:
+                end_line = None
+            rule_id = message.get("ruleId")
+            rule_text = str(rule_id) if rule_id else "eslint"
+            severity_level = message.get("severity")
+            severity = _eslint_severity(severity_level if isinstance(severity_level, int) else 1)
+            finding = _finding(
+                path=_relative_path(file_path, root),
+                line=line,
+                end_line=end_line,
+                severity=severity,
+                category=_eslint_category(str(rule_id) if rule_id else None),
+                comment=f"{rule_text}: {message.get('message') or ''}".rstrip(": "),
+                source="eslint",
+            )
+            if finding is not None:
+                findings.append(finding)
+    return findings
+
+
 def _resolve_executable(name: str) -> str | None:
     """Resolve a static tool on PATH or in the active environment's bin directory."""
     found = shutil.which(name)
@@ -296,10 +380,22 @@ def run_bandit(
     return parse_bandit_json(raw, root=root), None
 
 
+def run_eslint(
+    paths: Iterable[Path],
+    root: Path,
+) -> tuple[list[Finding], str | None]:
+    args = ["eslint", "--format", "json", *_path_args(paths, root)]
+    result, warning = _run_command(args, root)
+    if result is None:
+        return [], warning
+    raw = result.stdout or result.stderr
+    return parse_eslint_json(raw, root=root), None
+
+
 def run_static_tools(
     paths: Iterable[str | Path],
     root: str | Path = ".",
-    tools: Iterable[ToolName] = ("ruff", "mypy", "bandit"),
+    tools: Iterable[ToolName] = ("ruff", "mypy", "bandit", "eslint"),
 ) -> StaticToolsResult:
     """Run configured static tools and return normalized findings plus skip warnings."""
     root_path = Path(root)
@@ -307,21 +403,29 @@ def run_static_tools(
     if not path_list:
         return StaticToolsResult(findings=[])
 
+    python_paths = [path for path in path_list if _is_python_path(path)]
+    js_paths = [path for path in path_list if _is_js_path(path)]
+
     findings: list[Finding] = []
     warnings: list[str] = []
     requested = set(tools)
-    if "ruff" in requested:
-        tool_findings, warning = run_ruff(path_list, root_path)
+    if "ruff" in requested and python_paths:
+        tool_findings, warning = run_ruff(python_paths, root_path)
         findings.extend(tool_findings)
         if warning is not None:
             warnings.append(warning)
-    if "mypy" in requested:
-        tool_findings, warning = run_mypy(path_list, root_path)
+    if "mypy" in requested and python_paths:
+        tool_findings, warning = run_mypy(python_paths, root_path)
         findings.extend(tool_findings)
         if warning is not None:
             warnings.append(warning)
-    if "bandit" in requested:
-        tool_findings, warning = run_bandit(path_list, root_path)
+    if "bandit" in requested and python_paths:
+        tool_findings, warning = run_bandit(python_paths, root_path)
+        findings.extend(tool_findings)
+        if warning is not None:
+            warnings.append(warning)
+    if "eslint" in requested and js_paths:
+        tool_findings, warning = run_eslint(js_paths, root_path)
         findings.extend(tool_findings)
         if warning is not None:
             warnings.append(warning)

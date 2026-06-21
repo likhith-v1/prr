@@ -9,8 +9,10 @@ from unittest.mock import patch
 
 from core.detect_static import (
     parse_bandit_json,
+    parse_eslint_json,
     parse_mypy_text,
     parse_ruff_json,
+    run_eslint,
     run_ruff,
     run_static_tools,
 )
@@ -115,9 +117,64 @@ class StaticParserTests(unittest.TestCase):
         self.assertEqual(findings[0].source, "bandit")
         self.assertEqual(findings[0].confidence, 0.7)
 
+    def test_parse_eslint_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = json.dumps([
+                {
+                    "filePath": str(root / "sample.ts"),
+                    "messages": [
+                        {
+                            "ruleId": "no-unused-vars",
+                            "severity": 2,
+                            "message": "'unused' is defined but never used.",
+                            "line": 1,
+                            "column": 7,
+                            "endLine": 1,
+                            "endColumn": 13,
+                        }
+                    ],
+                    "errorCount": 1,
+                    "warningCount": 0,
+                }
+            ])
+
+            findings = parse_eslint_json(raw, root=root)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].path, "sample.ts")
+        self.assertEqual(findings[0].line, 1)
+        self.assertEqual(findings[0].end_line, 1)
+        self.assertEqual(findings[0].severity, "error")
+        self.assertEqual(findings[0].category, "bug")
+        self.assertEqual(findings[0].source, "eslint")
+        self.assertIn("no-unused-vars", findings[0].comment)
+
+    def test_parse_eslint_json_maps_security_rules(self) -> None:
+        raw = json.dumps([
+            {
+                "filePath": "app.ts",
+                "messages": [
+                    {
+                        "ruleId": "security/detect-eval-with-expression",
+                        "severity": 2,
+                        "message": "eval can be harmful.",
+                        "line": 4,
+                        "column": 3,
+                    }
+                ],
+            }
+        ])
+
+        findings = parse_eslint_json(raw)
+
+        self.assertEqual(findings[0].category, "security")
+        self.assertEqual(findings[0].severity, "error")
+
     def test_malformed_tool_output_fails_closed(self) -> None:
         self.assertEqual(parse_ruff_json("not json"), [])
         self.assertEqual(parse_bandit_json("not json"), [])
+        self.assertEqual(parse_eslint_json("not json"), [])
         self.assertEqual(parse_mypy_text("not mypy output"), [])
 
     def test_static_tool_timeout_fails_closed(self) -> None:
@@ -140,6 +197,28 @@ class StaticParserTests(unittest.TestCase):
         self.assertEqual(result.findings, [])
         self.assertEqual(len(result.warnings), 3)
         self.assertTrue(all("not found" in warning for warning in result.warnings))
+
+    def test_run_static_tools_skips_eslint_when_no_js_files(self) -> None:
+        with patch("core.detect_static._resolve_executable", return_value=None):
+            result = run_static_tools([Path("sample.py")], root=Path("."))
+
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.warnings), 3)
+
+    def test_run_static_tools_reports_missing_eslint_for_js_files(self) -> None:
+        with patch("core.detect_static._resolve_executable", return_value=None):
+            result = run_static_tools([Path("sample.ts")], root=Path("."))
+
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("eslint", result.warnings[0])
+
+    def test_run_eslint_missing_executable_fails_gracefully(self) -> None:
+        with patch("core.detect_static._resolve_executable", return_value=None):
+            findings, warning = run_eslint([Path("sample.ts")], root=Path("."))
+
+        self.assertEqual(findings, [])
+        self.assertIn("eslint not found", warning or "")
 
     def test_resolve_executable_falls_back_to_interpreter_bin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

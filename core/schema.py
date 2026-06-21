@@ -19,7 +19,7 @@ class Finding(BaseModel):
     category: Literal["bug", "security", "style", "perf", "test", "other"]
     comment: str                 # terse human explanation
     suggestion: str | None = None  # replacement code for the line(s)
-    source: Literal["llm", "ruff", "mypy", "bandit"]
+    source: Literal["llm", "ruff", "mypy", "bandit", "eslint"]
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)  # used for thresholding LLM findings
 
     @field_validator("path", "comment")
