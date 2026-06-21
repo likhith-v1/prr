@@ -457,16 +457,19 @@ def _pr_review_targets(
     pr_files: list[dict[str, object]],
     config: PrrConfig,
 ) -> tuple[list[PrTarget], list[SkippedPrFile]]:
-    """Select reviewable PR files and track skipped Python files."""
+    """Select reviewable PR files and track skipped files."""
     targets: list[PrTarget] = []
     skipped: list[SkippedPrFile] = []
     for item in pr_files:
         filename = str(item.get("filename") or "")
         patch = item.get("patch")
-        if not filename.endswith(".py"):
-            continue
         if item.get("status") == "removed":
             skipped.append(SkippedPrFile(filename, "removed file"))
+            continue
+        if not filename.endswith(".py"):
+            skipped.append(
+                SkippedPrFile(filename, "non-Python file, language not yet supported")
+            )
             continue
         if _matches_ignore(filename, config):
             skipped.append(SkippedPrFile(filename, "ignored by config"))
@@ -523,7 +526,7 @@ def _pr_review_notes(skipped: list[SkippedPrFile]) -> list[str]:
     ]
     if skipped:
         rendered = ", ".join(f"{item.path} ({item.reason})" for item in skipped)
-        notes.append(f"Skipped Python file(s): {rendered}.")
+        notes.append(f"Skipped file(s): {rendered}.")
     return notes
 
 
@@ -586,6 +589,8 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
             url = str(result.get("html_url") or "")
             console.print(f"[green]Review posted.[/green] {url}".rstrip())
         elif skipped:
+            console.print("\n[dim]Review body that would be posted:[/dim]")
+            console.print(build_summary([], notes=notes))
             console.print("[dim]Dry run — review not posted.[/dim]")
         return 0
 
