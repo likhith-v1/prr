@@ -120,8 +120,10 @@ ignore_paths:
 
 | Setting | Purpose |
 |---------|---------|
-| `model` | Ollama model name |
+| `model` | Model name (Ollama tag or vLLM model ID) |
 | `ollama_host` | Ollama server URL (see below) |
+| `backend` | `ollama` (default) or `vllm` |
+| `vllm_base_url` | vLLM server URL, e.g. `http://localhost:8000/v1` |
 | `severity_threshold` | Drop findings below this severity |
 | `min_confidence` | Drop LLM findings below this confidence |
 | `max_comments_per_file` | Cap findings per file after filtering |

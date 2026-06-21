@@ -3,12 +3,13 @@
 Swap the backend (or MODEL constant) and callers are unaffected.
 
 Week 1: Ollama backend, qwen2.5-coder:14b.
-Future:  replace OllamaBackend with VllmBackend (same protocol) or change MODEL.
+Week 5: VllmBackend added — set backend: vllm + vllm_base_url in config.yaml.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -65,6 +66,65 @@ class OllamaBackend:
         except (ConnectionError, ollama.RequestError, ollama.ResponseError) as exc:
             raise ModelBackendError(str(exc)) from exc
         return response["message"]["content"]
+
+
+class VllmBackend:
+    """vLLM backend using the OpenAI-compatible /v1/chat/completions endpoint.
+
+    Install the optional dependency first: uv sync --extra vllm
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        format_schema: dict[str, Any] | None = None,
+        api_key: str | None = None,
+        client: Any | None = None,
+    ) -> None:
+        self.model = model
+        self.base_url = base_url
+        self.format_schema = format_schema
+        if client is not None:
+            self._client = client
+        else:
+            try:
+                from openai import OpenAI  # type: ignore[import-untyped]
+            except ImportError as exc:
+                raise ModelBackendError(
+                    "openai package is required for VllmBackend. "
+                    "Install it with: uv sync --extra vllm"
+                ) from exc
+            resolved_key = (
+                api_key if api_key is not None
+                else os.environ.get("OPENAI_API_KEY", "EMPTY")
+            )
+            self._client = OpenAI(base_url=base_url, api_key=resolved_key)
+
+    def generate(self, system: str, user: str) -> str:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if self.format_schema is not None:
+            kwargs["extra_body"] = {"guided_json": self.format_schema}
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+            if not response.choices:
+                raise ModelBackendError("vLLM returned no completion choices")
+            content = response.choices[0].message.content
+            if content is None:
+                raise ModelBackendError("vLLM returned an empty response")
+            return content
+        except ModelBackendError:
+            raise
+        except (ConnectionError, Exception) as exc:
+            # Catch openai.APIError / openai.APIConnectionError without requiring
+            # the openai package to be installed in the test environment.
+            raise ModelBackendError(str(exc)) from exc
 
 
 # ── transient boundary models (not Finding — snippet is dropped after relocation) ──
@@ -168,6 +228,35 @@ def _parse_findings(
     return findings
 
 
+# ── backend factory ───────────────────────────────────────────────────────────
+
+def _make_backend(
+    *,
+    model: str,
+    backend_type: Literal["ollama", "vllm"],
+    ollama_host: str | None,
+    vllm_base_url: str | None,
+    format_schema: dict[str, Any] | None,
+) -> Backend:
+    """Instantiate the appropriate backend from configuration."""
+    if backend_type == "vllm":
+        if not vllm_base_url:
+            raise ModelBackendError(
+                "vllm_base_url is required when backend is vllm. "
+                "Set it in config.yaml or pass --config."
+            )
+        return VllmBackend(
+            model=model,
+            base_url=vllm_base_url,
+            format_schema=format_schema,
+        )
+    return OllamaBackend(
+        model=model,
+        format_schema=format_schema,
+        host=ollama_host,
+    )
+
+
 # ── public entry point ────────────────────────────────────────────────────────
 
 def review(
@@ -179,27 +268,33 @@ def review(
     backend: Backend | None = None,
     model: str = DEFAULT_MODEL,
     ollama_host: str | None = None,
+    backend_type: Literal["ollama", "vllm"] = "ollama",
+    vllm_base_url: str | None = None,
 ) -> list[Finding]:
     """Review one code chunk; return validated Finding objects.
 
     Args:
-        code:        Source text of the chunk.
-        path:        File path (used in Finding.path and the prompt).
-        start_line:  Absolute 1-based line number of the first line of *code*.
-        context:     Optional free-text context passed to the model.
-        findings:    Prior findings from static tools to anchor the model.
-        backend:     Override the default OllamaBackend (for testing/swap).
-        model:       Ollama model name when backend is not overridden.
-        ollama_host: Ollama server URL; falls back to OLLAMA_HOST env, then default.
+        code:         Source text of the chunk.
+        path:         File path (used in Finding.path and the prompt).
+        start_line:   Absolute 1-based line number of the first line of *code*.
+        context:      Optional free-text context passed to the model.
+        findings:     Prior findings from static tools to anchor the model.
+        backend:      Override the default backend (for testing/swap).
+        model:        Model name when backend is not overridden.
+        ollama_host:  Ollama server URL; falls back to OLLAMA_HOST env, then default.
+        backend_type: Which backend to use: "ollama" (default) or "vllm".
+        vllm_base_url: vLLM server URL (required when backend_type="vllm").
     """
     if findings is None:
         findings = []
 
     if backend is None:
-        backend = OllamaBackend(
+        backend = _make_backend(
             model=model,
+            backend_type=backend_type,
+            ollama_host=ollama_host,
+            vllm_base_url=vllm_base_url,
             format_schema=_LLMResponse.model_json_schema(),
-            host=ollama_host,
         )
 
     user_prompt = _build_user_prompt(code, path, start_line, context, findings)
