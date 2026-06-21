@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +83,19 @@ def make_pr_client() -> FakeGithubClient:
     )
 
 
+def make_sample_finding(**overrides: object) -> Finding:
+    data = {
+        "path": "sample.py",
+        "line": 2,
+        "severity": "error",
+        "category": "security",
+        "comment": "eval of untrusted input.",
+        "source": "llm",
+    }
+    data.update(overrides)
+    return Finding(**data)
+
+
 class CliTests(unittest.TestCase):
     def test_review_warns_when_static_tools_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,6 +117,104 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Static analysis skipped", rendered)
         self.assertIn("ruff not found", rendered)
+
+    def test_review_format_json_writes_findings_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.py"
+            path.write_text("def f():\n    return eval(data)\n", encoding="utf-8")
+            finding = make_sample_finding(path=str(path))
+            stdout = io.StringIO()
+
+            with (
+                patch("frontends.cli._run_static_tools", return_value=[]),
+                patch("frontends.cli.review", return_value=[finding]),
+                patch("frontends.cli.sys.stdout", stdout),
+            ):
+                result = cmd_review(
+                    argparse.Namespace(file=str(path), config=None, format="json")
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(result, 1)
+        self.assertEqual(len(payload), 1)
+        self.assertIn("sample.py", payload[0]["path"])
+        self.assertEqual(payload[0]["severity"], "error")
+        self.assertEqual(payload[0]["source"], "llm")
+
+    def test_review_format_markdown_writes_gfm_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.py"
+            path.write_text("def f():\n    return eval(data)\n", encoding="utf-8")
+            finding = make_sample_finding(path=str(path))
+            stdout = io.StringIO()
+
+            with (
+                patch("frontends.cli._run_static_tools", return_value=[]),
+                patch("frontends.cli.review", return_value=[finding]),
+                patch("frontends.cli.sys.stdout", stdout),
+            ):
+                result = cmd_review(
+                    argparse.Namespace(file=str(path), config=None, format="markdown")
+                )
+
+        rendered = stdout.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn("| path | line | severity | category | comment |", rendered)
+        self.assertIn("| --- | --- | --- | --- | --- |", rendered)
+        self.assertIn("eval of untrusted input.", rendered)
+        self.assertIn("| error |", rendered)
+
+    def test_review_format_terminal_keeps_cat_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.py"
+            path.write_text("def f():\n    return eval(data)\n", encoding="utf-8")
+            finding = make_sample_finding(path=str(path))
+            output = io.StringIO()
+
+            with (
+                patch("frontends.cli._run_static_tools", return_value=[]),
+                patch("frontends.cli.review", return_value=[finding]),
+                patch(
+                    "frontends.cli.console",
+                    Console(file=output, force_terminal=False, color_system=None),
+                ),
+            ):
+                result = cmd_review(
+                    argparse.Namespace(file=str(path), config=None, format="terminal")
+                )
+
+        rendered = output.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn("prr is not happy", rendered)
+        self.assertIn("eval of untrusted input.", rendered)
+
+    def test_scan_format_json_exit_code_matches_severity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "sample.py"
+            path.write_text("print(nam)\n", encoding="utf-8")
+            warning = make_sample_finding(
+                path=str(path),
+                severity="warning",
+                category="bug",
+                comment="Undefined name `nam`",
+                source="ruff",
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch("frontends.cli._run_static_tools", return_value=[warning]),
+                patch("frontends.cli.review", return_value=[]),
+                patch("frontends.cli.sys.stdout", stdout),
+            ):
+                result = cmd_scan(
+                    argparse.Namespace(path=str(root), config=None, format="json")
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["severity"], "warning")
 
     def test_model_backend_error_is_user_facing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -811,6 +923,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.command, "eval")
         self.assertEqual(args.cases, "cases.yaml")
         self.assertEqual(args.config, "config.yaml")
+
+    def test_parser_accepts_format_flag_on_review_and_scan(self) -> None:
+        review_args = build_parser().parse_args(["review", "sample.py", "--format", "json"])
+        scan_args = build_parser().parse_args(["scan", ".", "--format", "markdown"])
+
+        self.assertEqual(review_args.format, "json")
+        self.assertEqual(scan_args.format, "markdown")
 
     def test_eval_command_reports_regression_exit_code(self) -> None:
         expected = ExpectedIssue(line=2, category="bug", min_severity="warning")

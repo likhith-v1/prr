@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
 import sys
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from rich.console import Console
 from rich.panel import Panel
@@ -39,6 +41,9 @@ from core.model import ModelBackendError, review
 from core.schema import Finding, MOOD
 
 console = Console()
+_err_console = Console(file=sys.stderr, force_terminal=False)
+
+OutputFormat = Literal["terminal", "json", "markdown"]
 
 _PURR = """\
   /\\_____/\\
@@ -56,6 +61,54 @@ _SWAT = """\
 # ── severity colours ──────────────────────────────────────────────────────────
 _COLOUR = {"error": "red", "warning": "yellow", "info": "cyan"}
 _BORDER = {"error": "red", "warning": "yellow", "info": "blue"}
+
+
+def _output_format(args: argparse.Namespace) -> OutputFormat:
+    return getattr(args, "format", "terminal")
+
+
+def _is_machine_format(fmt: OutputFormat) -> bool:
+    return fmt in ("json", "markdown")
+
+
+def _findings_exit_code(findings: list[Finding]) -> int:
+    return 1 if any(f.severity == "error" for f in findings) else 0
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
+
+
+def _format_findings_json(findings: list[Finding]) -> str:
+    return json.dumps([finding.model_dump() for finding in findings], indent=2) + "\n"
+
+
+def _format_findings_markdown(findings: list[Finding]) -> str:
+    lines = [
+        "| path | line | severity | category | comment |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for finding in sorted(findings, key=lambda item: (item.path, item.line)):
+        lines.append(
+            "| "
+            + " | ".join([
+                _markdown_cell(finding.path),
+                str(finding.line),
+                finding.severity,
+                finding.category,
+                _markdown_cell(finding.comment),
+            ])
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _emit_machine_findings(findings: list[Finding], fmt: OutputFormat) -> int:
+    if fmt == "json":
+        sys.stdout.write(_format_findings_json(findings))
+    else:
+        sys.stdout.write(_format_findings_markdown(findings))
+    return _findings_exit_code(findings)
 
 
 def _render_finding(f: Finding) -> None:
@@ -135,6 +188,8 @@ def _review_file(
     static_findings: list[Finding],
     root: Path,
     only_lines: set[int] | None = None,
+    *,
+    quiet: bool = False,
 ) -> tuple[list[Finding], bool, bool]:
     """Review one file; returns (findings, ok, had_chunks).
 
@@ -157,10 +212,11 @@ def _review_file(
             range(chunk.start_line, chunk.end_line + 1)
         ):
             continue
-        console.print(
-            f"  [dim]→ {chunk.kind} [bold]{chunk.name}[/bold]"
-            f"  (lines {chunk.start_line}–{chunk.end_line})[/dim]"
-        )
+        if not quiet:
+            console.print(
+                f"  [dim]→ {chunk.kind} [bold]{chunk.name}[/bold]"
+                f"  (lines {chunk.start_line}–{chunk.end_line})[/dim]"
+            )
         prior = findings_for_chunk(chunk, static_findings, root=root)
         try:
             found = review(
@@ -209,6 +265,16 @@ def _render_findings(findings: list[Finding], target: Path) -> int:
     return 1 if any(f.severity == "error" for f in findings) else 0
 
 
+def _output_review_findings(
+    findings: list[Finding],
+    target: Path,
+    fmt: OutputFormat,
+) -> int:
+    if _is_machine_format(fmt):
+        return _emit_machine_findings(findings, fmt)
+    return _render_findings(findings, target)
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     if getattr(args, "pr", None):
         if getattr(args, "file", None):
@@ -227,10 +293,19 @@ def cmd_review(args: argparse.Namespace) -> int:
     if not _validate_reviewable_file(path):
         return 1
 
-    console.print(f"\n[bold]prr[/bold] reviewing [cyan]{path}[/cyan] …\n")
+    fmt = _output_format(args)
+    quiet = _is_machine_format(fmt)
+    if not quiet:
+        console.print(f"\n[bold]prr[/bold] reviewing [cyan]{path}[/cyan] …\n")
 
-    static_findings = _run_static_tools([path], root=Path.cwd())
-    llm_findings, ok, had_chunks = _review_file(path, config, static_findings, root=Path.cwd())
+    static_findings = _run_static_tools([path], root=Path.cwd(), quiet=quiet)
+    llm_findings, ok, had_chunks = _review_file(
+        path,
+        config,
+        static_findings,
+        root=Path.cwd(),
+        quiet=quiet,
+    )
     if not ok:
         return 2
 
@@ -240,10 +315,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         root=Path.cwd(),
     )
     if not all_findings and not had_chunks:
-        console.print("[dim]File is empty.[/dim]")
-        return 0
+        if not quiet:
+            console.print("[dim]File is empty.[/dim]")
+        return _output_review_findings([], path, fmt)
 
-    return _render_findings(all_findings, path)
+    return _output_review_findings(all_findings, path, fmt)
 
 
 def _matches_ignore(rel: str, config: PrrConfig) -> bool:
@@ -313,6 +389,16 @@ def _render_scan_findings(findings: list[Finding], target: Path) -> int:
     return 1 if any(f.severity == "error" for f in findings) else 0
 
 
+def _output_scan_findings(
+    findings: list[Finding],
+    target: Path,
+    fmt: OutputFormat,
+) -> int:
+    if _is_machine_format(fmt):
+        return _emit_machine_findings(findings, fmt)
+    return _render_scan_findings(findings, target)
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     config = _load_config_for_args(args)
     if config is None:
@@ -323,25 +409,30 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if collected is None:
         return 1
     root, files = collected
+    fmt = _output_format(args)
+    quiet = _is_machine_format(fmt)
     if not files:
-        if is_eslint_available():
-            console.print(f"[dim]No reviewable files found under {target}.[/dim]")
-        else:
-            console.print(
-                f"[dim]No Python files found under {target}. "
-                "Install eslint on PATH to include .ts/.js files.[/dim]"
-            )
-        return 0
+        if not quiet:
+            if is_eslint_available():
+                console.print(f"[dim]No reviewable files found under {target}.[/dim]")
+            else:
+                console.print(
+                    f"[dim]No Python files found under {target}. "
+                    "Install eslint on PATH to include .ts/.js files.[/dim]"
+                )
+        return _output_scan_findings([], target, fmt)
 
-    console.print(f"\n[bold]prr[/bold] scanning [cyan]{target}[/cyan] …\n")
-    static_findings = _run_static_tools(files, root=root)
+    if not quiet:
+        console.print(f"\n[bold]prr[/bold] scanning [cyan]{target}[/cyan] …\n")
+    static_findings = _run_static_tools(files, root=root, quiet=quiet)
 
     llm_findings: list[Finding] = []
     for path in files:
         if path.suffix != ".py":
             continue
-        console.print(f"[dim]file {path}[/dim]")
-        found, ok, _ = _review_file(path, config, static_findings, root=root)
+        if not quiet:
+            console.print(f"[dim]file {path}[/dim]")
+        found, ok, _ = _review_file(path, config, static_findings, root=root, quiet=quiet)
         if not ok:
             return 2
         llm_findings.extend(found)
@@ -351,7 +442,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         config=config,
         root=root,
     )
-    return _render_scan_findings(findings, target)
+    return _output_scan_findings(findings, target, fmt)
 
 
 # ── eval mode ─────────────────────────────────────────────────────────────────
@@ -532,21 +623,24 @@ def _cap_pr_findings(findings: list[Finding], config: PrrConfig) -> tuple[list[F
     return kept, len(prioritized) - len(kept)
 
 
-def _print_static_tool_warnings(warnings: tuple[str, ...]) -> None:
+def _print_static_tool_warnings(warnings: tuple[str, ...], *, quiet: bool = False) -> None:
+    sink = _err_console if quiet else console
     for warning in warnings:
-        console.print(f"[yellow]Static analysis skipped:[/yellow] {warning}")
+        sink.print(f"[yellow]Static analysis skipped:[/yellow] {warning}")
 
 
 def _run_static_tools(
     paths: list[Path],
     root: Path,
     tools: tuple[ToolName, ...] | None = None,
+    *,
+    quiet: bool = False,
 ) -> list[Finding]:
     if tools is None:
         result = run_static_tools(paths, root=root)
     else:
         result = run_static_tools(paths, root=root, tools=tools)
-    _print_static_tool_warnings(result.warnings)
+    _print_static_tool_warnings(result.warnings, quiet=quiet)
     return result.findings
 
 
@@ -757,11 +851,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build the PR review but do not post it to GitHub",
     )
     p_review.add_argument("--config", help="Path to config.yaml")
+    p_review.add_argument(
+        "--format",
+        choices=("terminal", "json", "markdown"),
+        default="terminal",
+        help="Output format (default: terminal)",
+    )
 
     # prr scan <path>
     p_scan = sub.add_parser("scan", help="Scan Python and optional TS/JS files in a path")
     p_scan.add_argument("path", help="File or directory to scan")
     p_scan.add_argument("--config", help="Path to config.yaml")
+    p_scan.add_argument(
+        "--format",
+        choices=("terminal", "json", "markdown"),
+        default="terminal",
+        help="Output format (default: terminal)",
+    )
 
     # prr eval
     p_eval = sub.add_parser("eval", help="Run seeded regression eval cases")
