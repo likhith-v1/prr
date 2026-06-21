@@ -463,6 +463,9 @@ def _pr_review_targets(
     for item in pr_files:
         filename = str(item.get("filename") or "")
         patch = item.get("patch")
+        if not filename.endswith(".py"):
+            skipped.append(SkippedPrFile(filename, "non-Python file, language not yet supported"))
+            continue
         if item.get("status") == "removed":
             skipped.append(SkippedPrFile(filename, "removed file"))
             continue
@@ -669,6 +672,8 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
     has_errors = any(finding.severity == "error" for finding in kept)
 
     if args.dry_run:
+        console.print("\n[dim]Review body that would be posted:[/dim]")
+        console.print(summary)
         console.print("[dim]Dry run — review not posted.[/dim]")
         return _pr_exit_code(has_errors, args)
 

@@ -642,31 +642,87 @@ class CliTests(unittest.TestCase):
         self.assertEqual(client.posted, [])
         self.assertIn("Dry run", output.getvalue())
 
-    def test_pr_review_targets_prioritizes_removed_before_non_python(self) -> None:
+    def test_pr_review_dry_run_prints_summary(self) -> None:
+        client = make_pr_client()
+        output = io.StringIO()
+
+        def fake_review(**kwargs: object) -> list[Finding]:
+            return [
+                Finding(
+                    path=str(kwargs["path"]),
+                    line=2,
+                    severity="warning",
+                    category="security",
+                    comment="eval of untrusted input.",
+                    source="llm",
+                    confidence=0.95,
+                )
+            ]
+
+        with (
+            patch("frontends.cli._run_static_tools", return_value=[]),
+            patch("frontends.cli.review", side_effect=fake_review),
+            patch("frontends.cli._github_client", return_value=client),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_review(
+                argparse.Namespace(file=None, pr="octo/prr#7", dry_run=True, config=None)
+            )
+
+        rendered = output.getvalue()
+        normalized = " ".join(rendered.split())
+        self.assertEqual(result, 0)
+        self.assertEqual(client.posted, [])
+        self.assertIn("mypy is skipped until full-checkout review is added", normalized)
+        self.assertTrue(
+            "prr is purring" in normalized or "prr is not happy" in normalized,
+            msg=rendered,
+        )
+        self.assertIn("Review body that would be posted:", rendered)
+
+    def test_pr_review_targets_skips_non_python_files(self) -> None:
         pr_files = [
-            {"filename": "src/old.ts", "status": "removed", "patch": "@@ -1 +0,0 @@\n-x"},
-            {"filename": "src/new.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"},
+            {
+                "filename": "src/utils.ts",
+                "status": "modified",
+                "patch": "@@ -1 +1 @@\n-a\n+b",
+            },
+            {
+                "filename": "src/app.py",
+                "status": "modified",
+                "patch": "@@ -1 +1,2 @@\n x = 1\n+x = 2",
+            },
         ]
 
         targets, skipped = _pr_review_targets(pr_files, PrrConfig())
 
-        self.assertEqual(targets, [])
         self.assertEqual(
             skipped,
             [
-                SkippedPrFile("src/old.ts", "removed file"),
-                SkippedPrFile("src/new.ts", "non-Python file, language not yet supported"),
+                SkippedPrFile(
+                    "src/utils.ts",
+                    "non-Python file, language not yet supported",
+                )
             ],
         )
+        self.assertEqual([target.path for target in targets], ["src/app.py"])
 
-    def test_pr_review_dry_run_prints_summary_when_all_files_are_skipped(self) -> None:
+    def test_pr_review_dry_run_reports_skipped_non_python_files(self) -> None:
         client = FakeGithubClient(
-            files=[{"filename": "src/new.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"}],
-            contents={},
+            files=[
+                {"filename": "src/utils.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"},
+                {"filename": "pkg/sample.py", "status": "modified", "patch": _PR_PATCH},
+            ],
+            contents={"pkg/sample.py": _PR_CONTENT},
         )
         output = io.StringIO()
 
         with (
+            patch("frontends.cli._run_static_tools", return_value=[]),
+            patch("frontends.cli.review", return_value=[]),
             patch("frontends.cli._github_client", return_value=client),
             patch(
                 "frontends.cli.console",
@@ -679,11 +735,9 @@ class CliTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertEqual(result, 0)
-        self.assertIn("Review body that would be posted:", rendered)
-        self.assertIn("Skipped file(s):", rendered)
-        self.assertNotIn("Skipped Python file(s):", rendered)
-        self.assertIn("src/new.ts", rendered)
-        self.assertIn("Dry run — review not posted.", rendered)
+        self.assertEqual(client.posted, [])
+        self.assertIn("src/utils.ts", rendered)
+        self.assertIn("non-Python file, language not yet supported", rendered)
 
     def test_scan_invalid_config_is_user_facing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
