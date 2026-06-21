@@ -27,3 +27,31 @@ cases:
       - line: 5
         category: security
         min_severity: warning
+  - id: bare-except
+    path: bare_except.py
+    source: fixtures/bare_except.py.txt
+    expected:
+      - line: 4
+        category: bug
+        min_severity: warning
+  - id: os-system-injection
+    path: os_system_injection.py
+    source: fixtures/os_system_injection.py.txt
+    expected:
+      - line: 5
+        category: security
+        min_severity: warning
+  - id: sql-injection
+    path: sql_injection.py
+    source: fixtures/sql_injection.py.txt
+    expected:
+      - line: 7
+        category: security
+        min_severity: warning
+  - id: open-no-encoding
+    path: open_no_encoding.py
+    source: fixtures/open_no_encoding.py.txt
+    expected:
+      - line: 2
+        category: bug
+        min_severity: warning

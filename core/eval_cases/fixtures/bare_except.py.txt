@@ -1,0 +1,5 @@
+def handle_request(path: str) -> bytes:
+    try:
+        return fetch(path)
+    except:
+        return b""

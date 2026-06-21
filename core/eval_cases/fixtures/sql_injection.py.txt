@@ -1,0 +1,8 @@
+import sqlite3
+
+
+def find_user(db: str, user_id: str) -> tuple | None:
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id = '%s'" % user_id)
+    return cur.fetchone()

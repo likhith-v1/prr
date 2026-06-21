@@ -12,6 +12,23 @@ from core.model import ModelBackendError
 from core.schema import Finding
 
 
+def _fake_review_for_expected(**kwargs: object) -> list[Finding]:
+    path = Path(str(kwargs["path"]))
+    cases, _ = load_eval_cases(None)
+    case = next(item for item in cases if item.path == path.name)
+    return [
+        Finding(
+            path=str(path),
+            line=expected.line,
+            severity=expected.min_severity,
+            category=expected.category,
+            comment=f"Expected issue at line {expected.line}.",
+            source="llm",
+        )
+        for expected in case.expected
+    ]
+
+
 def write_manifest(root: Path, source: str, expected: str) -> Path:
     fixture = root / "fixtures" / "sample.py.txt"
     fixture.parent.mkdir()
@@ -223,6 +240,35 @@ class EvalTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertEqual(report.caught_count, 1)
         self.assertEqual(report.false_positive_count, 0)
+
+    def test_loads_built_in_manifest(self) -> None:
+        cases, _ = load_eval_cases(None)
+
+        self.assertEqual(len(cases), 8)
+        self.assertEqual({case.id for case in cases}, {
+            "unsafe-eval",
+            "zero-division",
+            "mutable-default",
+            "subprocess-shell",
+            "bare-except",
+            "os-system-injection",
+            "sql-injection",
+            "open-no-encoding",
+        })
+
+    def test_built_in_cases_pass_with_fake_backend(self) -> None:
+        report = run_eval(
+            PrrConfig(),
+            cases_path=None,
+            review_func=_fake_review_for_expected,
+            static_func=lambda paths, root: StaticToolsResult(findings=[]),
+        )
+
+        self.assertTrue(report.ok)
+        self.assertEqual(report.missed_count, 0)
+        self.assertEqual(report.false_positive_count, 0)
+        self.assertEqual(report.caught_count, report.expected_count)
+        self.assertEqual(report.expected_count, 8)
 
 
 if __name__ == "__main__":

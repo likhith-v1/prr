@@ -1,0 +1,5 @@
+import os
+
+
+def greet_user(name: str) -> int:
+    return os.system(f"echo Hello, {name}")
