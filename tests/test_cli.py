@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from rich.console import Console
 
+from core.config import PrrConfig
 from core.eval import (
     CaseEvalResult,
     EvalCase,
@@ -20,7 +21,14 @@ from core.eval import (
 )
 from core.model import ModelBackendError
 from core.schema import Finding
-from frontends.cli import build_parser, cmd_eval, cmd_review, cmd_scan
+from frontends.cli import (
+    SkippedPrFile,
+    _pr_review_targets,
+    build_parser,
+    cmd_eval,
+    cmd_review,
+    cmd_scan,
+)
 
 
 class FakeGithubClient:
@@ -633,6 +641,49 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(client.posted, [])
         self.assertIn("Dry run", output.getvalue())
+
+    def test_pr_review_targets_prioritizes_removed_before_non_python(self) -> None:
+        pr_files = [
+            {"filename": "src/old.ts", "status": "removed", "patch": "@@ -1 +0,0 @@\n-x"},
+            {"filename": "src/new.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"},
+        ]
+
+        targets, skipped = _pr_review_targets(pr_files, PrrConfig())
+
+        self.assertEqual(targets, [])
+        self.assertEqual(
+            skipped,
+            [
+                SkippedPrFile("src/old.ts", "removed file"),
+                SkippedPrFile("src/new.ts", "non-Python file, language not yet supported"),
+            ],
+        )
+
+    def test_pr_review_dry_run_prints_summary_when_all_files_are_skipped(self) -> None:
+        client = FakeGithubClient(
+            files=[{"filename": "src/new.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"}],
+            contents={},
+        )
+        output = io.StringIO()
+
+        with (
+            patch("frontends.cli._github_client", return_value=client),
+            patch(
+                "frontends.cli.console",
+                Console(file=output, force_terminal=False, color_system=None),
+            ),
+        ):
+            result = cmd_review(
+                argparse.Namespace(file=None, pr="octo/prr#7", dry_run=True, config=None)
+            )
+
+        rendered = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("Review body that would be posted:", rendered)
+        self.assertIn("Skipped file(s):", rendered)
+        self.assertNotIn("Skipped Python file(s):", rendered)
+        self.assertIn("src/new.ts", rendered)
+        self.assertIn("Dry run — review not posted.", rendered)
 
     def test_scan_invalid_config_is_user_facing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
